@@ -199,7 +199,7 @@ func ParseAdblock(line string) *Rule {
 	return nil
 }
 
-func normalizeWildcard(domain string, expectedType string) *Rule {
+func normalizeClashWildcard(domain string, expectedType string) *Rule {
 	if domain == "*" {
 		return &Rule{"DOMAIN-REGEX", "^[^.]+$"}
 	}
@@ -269,7 +269,7 @@ func parseStandardClash(line string) *Rule {
 			return &Rule{Type: t, Value: cleanV}
 		}
 		if (t == "DOMAIN" || t == "DOMAIN-SUFFIX") {
-			if r := normalizeWildcard(cleanV, t); r != nil {
+			if r := normalizeClashWildcard(cleanV, t); r != nil {
 				return r
 			}
 		}
@@ -288,7 +288,7 @@ func parseFallback(line string) *Rule {
 	if line == "Mijia Cloud" {
 		return &Rule{"DOMAIN-REGEX", `^Mijia\sCloud$`}
 	}
-	if r := normalizeWildcard(line, "DOMAIN-REGEX"); r != nil {
+	if r := normalizeClashWildcard(line, "DOMAIN-REGEX"); r != nil {
 		return r
 	}
 	if nakedDomainRegex.MatchString(line) {
@@ -399,6 +399,15 @@ func parseIPOrCIDR(line string) *Rule {
 
 func ParseAppleClients(line string) *Rule {
 	line = strings.TrimSpace(line)
+	if !strings.Contains(line, ",") {
+		if strings.HasPrefix(line, ".") {
+			return &Rule{"DOMAIN-SUFFIX", strings.TrimPrefix(line, ".")}
+		}
+		if nakedDomainRegex.MatchString(line) {
+			return &Rule{"DOMAIN", line}
+		}
+		return nil
+	}
 	parts := strings.Split(line, ",")
 	if len(parts) >= 2 {
 		line = strings.TrimSpace(parts[0]) + "," + strings.TrimSpace(parts[1])

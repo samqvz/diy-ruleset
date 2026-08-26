@@ -110,10 +110,15 @@ config.yaml 包含 global (全局参数) 与 categories (规则集分组) 两部
 * `single_file: true/false`：设置为 **true** 时，引擎会将域名规则和 IP 规则混合打包输出为一个文件。设置为 **false** 时，引擎会将域名规则和 IP 规则分为两个独立文件。
 
 ### 2. 智能解析器
- **parser** 强制指定上游解析器，留空时引擎将自动嗅探。但更建议显式指定一种格式，可用值为：`clash`, `v2ray`, `adblock`, `hosts`, `dnsmasq`, `smartdns`, `surge`, `shadowrocket`, `quantumultx`, `loon`, `stash`, `white`。
+**parser** 强制指定上游解析器，留空时引擎将自动嗅探。但更建议显式指定一种格式。
+* 可用值为：`clash`, `v2ray`, `adblock`, `hosts`, `dnsmasq`, `smartdns`, `surge`, `shadowrocket`, `quantumultx`, `loon`, `stash`, `white`。
+* **注意**：
+1. 由于 **v2ray** 的 KEYWOED 规则为纯字符串，如果上游为 v2ray 规则，**请强制指定 parser 值为v2ray**。否则将自动嗅探为 Clash 的 DOMAIN 规则！
+2. 由于 **Apple客户端 (如 Surge 等)** 中会带有以“.”符号作为前缀的规则，它的规则类型为 SUFFIX ，如果上游带有这类规则，**请强制指定  parser 为 surge 等值**。否则将自动嗅探为 Clash 的域名通配符规则！
+* add/ 和 remove/ 目录自定义添加或剔除规则时，也请使用 **其它写法 (指定解析器)** 以避免这些规则类型的混淆。
 
 ### 3. DNS 防护与智能分流
- Dnsmasq 和 SmartDNS 格式既可以用来去广告，也可以用来做路由分流：
+Dnsmasq 和 SmartDNS 格式既可以用来去广告，也可以用来做路由分流：
 * **拦截模式**：默认情况下，输出为 `address=/domain/0.0.0.0`。
 * **分流模式**：如果你在配置中指定了 Server（例如 `dnsmasq_server: "223.5.5.5"`），引擎会自动将其转换为分流转发语法 `server=/domain/223.5.5.5`。
 

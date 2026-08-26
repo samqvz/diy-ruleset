@@ -5,6 +5,11 @@ DOMAIN-SUFFIX,browserscan.net
 DOMAIN-SUFFIX,dnsleaktest.com
 DOMAIN-SUFFIX,dnsleak.com
 DOMAIN-SUFFIX,dnscheck.tools
+DOMAIN-SUFFIX,workers.dev
+DOMAIN-SUFFIX,cloudflare-ipfs.com
+DOMAIN-SUFFIX,lsposed.org
+DOMAIN-SUFFIX,quetta.net
+DOMAIN-SUFFIX,ipapi.is
 DOMAIN-SUFFIX,google.cn
 DOMAIN-SUFFIX,gstatic.com
 DOMAIN-SUFFIX,google.com
@@ -40,8 +45,3 @@ DOMAIN-SUFFIX,googlevads-cn.com
 DOMAIN-SUFFIX,gstatic-cn.com
 DOMAIN-SUFFIX,gvt1-cn.com
 DOMAIN-SUFFIX,gvt2-cn.com
-DOMAIN-SUFFIX,workers.dev
-DOMAIN-SUFFIX,cloudflare-ipfs.com
-DOMAIN-SUFFIX,lsposed.org
-DOMAIN-SUFFIX,quetta.net
-DOMAIN-SUFFIX,ipapi.is
