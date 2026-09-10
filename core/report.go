@@ -150,13 +150,17 @@ func GenerateReport(results map[string]*ProcessedResult, cfg *Config) {
 
 	for _, cat := range cfg.Categories {
 		r, ok := results[cat.Name]
-		if !ok { continue }
-		
+		if !ok {
+			continue
+		}
+
 		baseTotal := r.RawCount + r.AddCount - r.RmCount
 		rate := 0.0
 		if baseTotal > 0 {
 			rate = (1.0 - float64(r.FinalCount)/float64(baseTotal)) * 100
-			if rate < 0 { rate = 0 }
+			if rate < 0 {
+				rate = 0
+			}
 		}
 
 		displayName := strings.ReplaceAll(cat.Name, "-", "&#8209;")
@@ -180,7 +184,9 @@ func GenerateReport(results map[string]*ProcessedResult, cfg *Config) {
 			}
 		}
 		upStr := strings.Join(upDetails, "<br>")
-		if upStr == "" { upStr = "-" }
+		if upStr == "" {
+			upStr = "-"
+		}
 
 		sb.WriteString(fmt.Sprintf("| **%s** | %d | %d | %d | %d | %.1f%% | **%s** |\n", displayName, r.FinalCount, r.RawCount, r.AddCount, r.RmCount, rate, upStr))
 
@@ -197,8 +203,10 @@ func GenerateReport(results map[string]*ProcessedResult, cfg *Config) {
 					}
 				}
 				whiteUpStr := strings.Join(whiteUpDetails, "<br>")
-				if whiteUpStr == "" { whiteUpStr = "-" }
-				sb.WriteString(fmt.Sprintf("| **%s** | %d | %d | 0 | 0 | 0.0%% | **%s** |\n", displayNameWhite, r.WhiteCount, r.WhiteCount, whiteUpStr)) 
+				if whiteUpStr == "" {
+					whiteUpStr = "-"
+				}
+				sb.WriteString(fmt.Sprintf("| **%s** | %d | %d | 0 | 0 | 0.0%% | **%s** |\n", displayNameWhite, r.WhiteCount, r.WhiteCount, whiteUpStr))
 			}
 		}
 	}
@@ -208,13 +216,15 @@ func GenerateReport(results map[string]*ProcessedResult, cfg *Config) {
 
 	for _, cat := range cfg.Categories {
 		r, ok := results[cat.Name]
-		if !ok { continue }
-		catOut := ResolveClients(cfg.Global, cat)
-		
-		if !catOut.Singbox.Enable && !catOut.Mihomo.Enable { 
-			continue 
+		if !ok {
+			continue
 		}
-		
+		catOut := ResolveClients(cfg.Global, cat)
+
+		if !catOut.Singbox.Enable && !catOut.Mihomo.Enable {
+			continue
+		}
+
 		catName := cat.Name
 
 		renderCoreRow := func(suffix string, rowType string) {
@@ -228,7 +238,7 @@ func GenerateReport(results map[string]*ProcessedResult, cfg *Config) {
 			miTxt := fmt.Sprintf("publish/mihomo/%s.txt", targetName)
 			miYaml := fmt.Sprintf("publish/mihomo/%s.yaml", targetName)
 			miMrs := fmt.Sprintf("publish/mihomo/%s.mrs", targetName)
-			
+
 			var miMrsIp string
 			if rowType == "main" && catOut.Mihomo.SingleFile {
 				miMrsIp = fmt.Sprintf("publish/mihomo/%s_ip.mrs", catName)
@@ -237,29 +247,40 @@ func GenerateReport(results map[string]*ProcessedResult, cfg *Config) {
 			hasSb := anyFileExists(sbJson, sbSrs)
 			hasMi := anyFileExists(miTxt, miYaml, miMrs) || (miMrsIp != "" && anyFileExists(miMrsIp))
 
-			if !hasSb && !hasMi { return }
+			if !hasSb && !hasMi {
+				return
+			}
 
 			var count int
-			if rowType == "main" {
-				if hasSb { 
-					count = r.ExactCounts["singbox_dom"] 
-					if catOut.Singbox.SingleFile { count = r.ExactCounts["singbox_total"] }
+			switch rowType {
+			case "main":
+				if hasSb {
+					count = r.ExactCounts["singbox_dom"]
+					if catOut.Singbox.SingleFile {
+						count = r.ExactCounts["singbox_total"]
+					}
 				} else {
 					count = r.ExactCounts["mihomo_dom"]
-					if catOut.Mihomo.SingleFile { count = r.ExactCounts["mihomo_total"] }
+					if catOut.Mihomo.SingleFile {
+						count = r.ExactCounts["mihomo_total"]
+					}
 				}
-			} else if rowType == "ip" {
-				if hasSb { count = r.ExactCounts["singbox_ip"] } else { count = r.ExactCounts["mihomo_ip"] }
-			} else if rowType == "white" {
+			case "ip":
+				if hasSb {
+					count = r.ExactCounts["singbox_ip"]
+				} else {
+					count = r.ExactCounts["mihomo_ip"]
+				}
+			case "white":
 				count = r.WhiteCount
 			}
 
 			var links []LinkDef
-			
+
 			if hasSb {
 				urlJson := fmt.Sprintf("https://github.com/%s/raw/publish/singbox/%s.json", os.Getenv("GITHUB_REPOSITORY"), targetName)
 				urlSrs := fmt.Sprintf("https://github.com/%s/raw/publish/singbox/%s.srs", os.Getenv("GITHUB_REPOSITORY"), targetName)
-				links = append(links, 
+				links = append(links,
 					LinkDef{"singbox&#8288;-&#8288;json", urlJson, getFileSize(sbJson), catOut.Singbox.JSON && anyFileExists(sbJson), "&nbsp;&nbsp;"},
 					LinkDef{"singbox&#8288;-&#8288;srs", urlSrs, getFileSize(sbSrs), catOut.Singbox.SRS && anyFileExists(sbSrs), "&nbsp;&nbsp;&nbsp;&nbsp;"},
 				)
@@ -269,18 +290,18 @@ func GenerateReport(results map[string]*ProcessedResult, cfg *Config) {
 				urlTxt := fmt.Sprintf("https://github.com/%s/raw/publish/mihomo/%s.txt", os.Getenv("GITHUB_REPOSITORY"), targetName)
 				urlYaml := fmt.Sprintf("https://github.com/%s/raw/publish/mihomo/%s.yaml", os.Getenv("GITHUB_REPOSITORY"), targetName)
 				urlMrs := fmt.Sprintf("https://github.com/%s/raw/publish/mihomo/%s.mrs", os.Getenv("GITHUB_REPOSITORY"), targetName)
-				
+
 				mrsLabel := "mihomo&#8288;-&#8288;mrs"
 				if miMrsIp != "" && anyFileExists(miMrsIp) && anyFileExists(miMrs) {
 					mrsLabel = "mihomo&#8288;-&#8288;mrs&#8288;(&#8288;domain&#8288;)"
 				}
-				
-				links = append(links, 
+
+				links = append(links,
 					LinkDef{"mihomo&#8288;-&#8288;txt", urlTxt, getFileSize(miTxt), catOut.Mihomo.TXT && anyFileExists(miTxt), "&nbsp;&nbsp;&nbsp;&nbsp;"},
 					LinkDef{"mihomo&#8288;-&#8288;yaml", urlYaml, getFileSize(miYaml), catOut.Mihomo.YAML && anyFileExists(miYaml), "&nbsp;"},
 					LinkDef{mrsLabel, urlMrs, getFileSize(miMrs), catOut.Mihomo.MRS && anyFileExists(miMrs), "&nbsp;&nbsp;"},
 				)
-				
+
 				if miMrsIp != "" && anyFileExists(miMrsIp) {
 					urlMrsIp := fmt.Sprintf("https://github.com/%s/raw/publish/mihomo/%s_ip.mrs", os.Getenv("GITHUB_REPOSITORY"), catName)
 					links = append(links, LinkDef{"mihomo&#8288;-&#8288;mrs&#8288;(&#8288;ipcidr&#8288;)", urlMrsIp, getFileSize(miMrsIp), catOut.Mihomo.MRS, "&nbsp;&nbsp;"})
@@ -292,11 +313,11 @@ func GenerateReport(results map[string]*ProcessedResult, cfg *Config) {
 		}
 
 		renderCoreRow("", "main")
-		
+
 		if !catOut.Singbox.SingleFile || !catOut.Mihomo.SingleFile {
 			renderCoreRow("_ip", "ip")
 		}
-		
+
 		if cat.PublishWhite {
 			renderCoreRow("_white", "white")
 		}
@@ -307,7 +328,9 @@ func GenerateReport(results map[string]*ProcessedResult, cfg *Config) {
 
 	for _, cat := range cfg.Categories {
 		r, ok := results[cat.Name]
-		if !ok { continue }
+		if !ok {
+			continue
+		}
 		catOut := ResolveClients(cfg.Global, cat)
 		if !(catOut.Surge.Enable || catOut.Shadowrocket.Enable || catOut.QuantumultX.Enable || catOut.Loon.Enable || catOut.Stash.Enable || catOut.Egern.Enable) {
 			continue
@@ -329,27 +352,48 @@ func GenerateReport(results map[string]*ProcessedResult, cfg *Config) {
 
 			if anyFileExists(surgeFile, srFile, qxFile, loonFile, stashFile, egernFile) {
 				var linesCount int
-				if rowType == "white" { 
-					if anyFileExists(surgeFile) { linesCount = r.ExactCounts["surge_total_white"] } else 
-					if anyFileExists(srFile) { linesCount = r.ExactCounts["shadowrocket_total_white"] } else 
-					if anyFileExists(qxFile) { linesCount = r.ExactCounts["quantumultx_total_white"] } else 
-					if anyFileExists(loonFile) { linesCount = r.ExactCounts["loon_total_white"] } else 
-					if anyFileExists(stashFile) { linesCount = r.ExactCounts["stash_total_white"] } else 
-					if anyFileExists(egernFile) { linesCount = r.ExactCounts["egern_total_white"] }
+				if rowType == "white" {
+					if anyFileExists(surgeFile) {
+						linesCount = r.ExactCounts["surge_total_white"]
+					} else if anyFileExists(srFile) {
+						linesCount = r.ExactCounts["shadowrocket_total_white"]
+					} else if anyFileExists(qxFile) {
+						linesCount = r.ExactCounts["quantumultx_total_white"]
+					} else if anyFileExists(loonFile) {
+						linesCount = r.ExactCounts["loon_total_white"]
+					} else if anyFileExists(stashFile) {
+						linesCount = r.ExactCounts["stash_total_white"]
+					} else if anyFileExists(egernFile) {
+						linesCount = r.ExactCounts["egern_total_white"]
+					}
 				} else if suffix == "_ip" {
-					if anyFileExists(surgeFile) { linesCount = r.ExactCounts["surge_ip"] } else 
-					if anyFileExists(srFile) { linesCount = r.ExactCounts["shadowrocket_ip"] } else 
-					if anyFileExists(qxFile) { linesCount = r.ExactCounts["quantumultx_ip"] } else 
-					if anyFileExists(loonFile) { linesCount = r.ExactCounts["loon_ip"] } else 
-					if anyFileExists(stashFile) { linesCount = r.ExactCounts["stash_ip"] } else 
-					if anyFileExists(egernFile) { linesCount = r.ExactCounts["egern_ip"] }
+					if anyFileExists(surgeFile) {
+						linesCount = r.ExactCounts["surge_ip"]
+					} else if anyFileExists(srFile) {
+						linesCount = r.ExactCounts["shadowrocket_ip"]
+					} else if anyFileExists(qxFile) {
+						linesCount = r.ExactCounts["quantumultx_ip"]
+					} else if anyFileExists(loonFile) {
+						linesCount = r.ExactCounts["loon_ip"]
+					} else if anyFileExists(stashFile) {
+						linesCount = r.ExactCounts["stash_ip"]
+					} else if anyFileExists(egernFile) {
+						linesCount = r.ExactCounts["egern_ip"]
+					}
 				} else {
-					if anyFileExists(surgeFile) { linesCount = r.ExactCounts["surge_total"] } else
-					if anyFileExists(srFile) { linesCount = r.ExactCounts["shadowrocket_total"] } else
-					if anyFileExists(qxFile) { linesCount = r.ExactCounts["quantumultx_total"] } else
-					if anyFileExists(loonFile) { linesCount = r.ExactCounts["loon_total"] } else
-					if anyFileExists(stashFile) { linesCount = r.ExactCounts["stash_total"] } else
-					if anyFileExists(egernFile) { linesCount = r.ExactCounts["egern_total"] }
+					if anyFileExists(surgeFile) {
+						linesCount = r.ExactCounts["surge_total"]
+					} else if anyFileExists(srFile) {
+						linesCount = r.ExactCounts["shadowrocket_total"]
+					} else if anyFileExists(qxFile) {
+						linesCount = r.ExactCounts["quantumultx_total"]
+					} else if anyFileExists(loonFile) {
+						linesCount = r.ExactCounts["loon_total"]
+					} else if anyFileExists(stashFile) {
+						linesCount = r.ExactCounts["stash_total"]
+					} else if anyFileExists(egernFile) {
+						linesCount = r.ExactCounts["egern_total"]
+					}
 				}
 
 				urlSurge := fmt.Sprintf("https://github.com/%s/raw/publish/surge/%s.list", os.Getenv("GITHUB_REPOSITORY"), targetName)
@@ -382,10 +426,14 @@ func GenerateReport(results map[string]*ProcessedResult, cfg *Config) {
 
 	for _, cat := range cfg.Categories {
 		r, ok := results[cat.Name]
-		if !ok { continue }
+		if !ok {
+			continue
+		}
 		catOut := ResolveClients(cfg.Global, cat)
-		if !catOut.V2ray.Enable { continue }
-		
+		if !catOut.V2ray.Enable {
+			continue
+		}
+
 		catName := cat.Name
 
 		renderV2rayRow := func(suffix, rowType string) {
@@ -397,20 +445,34 @@ func GenerateReport(results map[string]*ProcessedResult, cfg *Config) {
 			v2File := fmt.Sprintf("publish/v2ray/%s.txt", targetName)
 			if anyFileExists(v2File) {
 				var linesCount int
-				if rowType == "white" {
-					if catOut.V2ray.SingleFile { linesCount = r.ExactCounts["v2ray_total_white"] } else { linesCount = r.ExactCounts["v2ray_dom_white"] }
-				} else if rowType == "ip" { 
-					linesCount = r.ExactCounts["v2ray_ip"] 
-				} else if catOut.V2ray.SingleFile { 
-					linesCount = r.ExactCounts["v2ray_total"] 
-				} else {
-					linesCount = r.ExactCounts["v2ray_dom"]
+				switch rowType {
+				case "white":
+					if catOut.V2ray.SingleFile {
+						linesCount = r.ExactCounts["v2ray_total_white"]
+					} else {
+						linesCount = r.ExactCounts["v2ray_dom_white"]
+					}
+				case "ip":
+					linesCount = r.ExactCounts["v2ray_ip"]
+				default:
+					if catOut.V2ray.SingleFile {
+						linesCount = r.ExactCounts["v2ray_total"]
+					} else {
+						linesCount = r.ExactCounts["v2ray_dom"]
+					}
 				}
 
 				label := "v2ray"
-				if rowType == "main" && !catOut.V2ray.SingleFile { label = "v2ray&#8288;-&#8288;domain" }
-				if rowType == "ip" { label = "v2ray&#8288;-&#8288;ipcidr" }
-				if rowType == "white" { label = "v2ray&#8288;-&#8288;white" }
+				switch rowType {
+				case "main":
+					if !catOut.V2ray.SingleFile {
+						label = "v2ray&#8288;-&#8288;domain"
+					}
+				case "ip":
+					label = "v2ray&#8288;-&#8288;ipcidr"
+				case "white":
+					label = "v2ray&#8288;-&#8288;white"
+				}
 
 				urlV2 := fmt.Sprintf("https://github.com/%s/raw/publish/v2ray/%s.txt", os.Getenv("GITHUB_REPOSITORY"), targetName)
 				cellDirect, cellProxy := buildLinksCell(ghProxy, enableProxy, LinkDef{label, urlV2, getFileSize(v2File), true, "&nbsp;"})
@@ -440,16 +502,22 @@ func GenerateReport(results map[string]*ProcessedResult, cfg *Config) {
 
 		renderDnsRow := func(suffix, rowType string) {
 			targetName := catName + suffix
-			if rowType == "white" { targetName = catName + "_white" }
+			if rowType == "white" {
+				targetName = catName + "_white"
+			}
 			displayName := strings.ReplaceAll(targetName, "-", "&#8209;")
 			adgFile := fmt.Sprintf("publish/adblock/%s.txt", targetName)
 			dnsmasqFile := fmt.Sprintf("publish/dnsmasq/%s.conf", targetName)
 			smartdnsFile := fmt.Sprintf("publish/smartdns/%s.conf", targetName)
 			if anyFileExists(adgFile, dnsmasqFile, smartdnsFile) {
 				var linesCount int
-				if anyFileExists(adgFile) { linesCount = getLineCount(adgFile) } else 
-				if anyFileExists(dnsmasqFile) { linesCount = getLineCount(dnsmasqFile) } else 
-				if anyFileExists(smartdnsFile) { linesCount = getLineCount(smartdnsFile) }
+				if anyFileExists(adgFile) {
+					linesCount = getLineCount(adgFile)
+				} else if anyFileExists(dnsmasqFile) {
+					linesCount = getLineCount(dnsmasqFile)
+				} else if anyFileExists(smartdnsFile) {
+					linesCount = getLineCount(smartdnsFile)
+				}
 
 				urlAdg := fmt.Sprintf("https://github.com/%s/raw/publish/adblock/%s.txt", os.Getenv("GITHUB_REPOSITORY"), targetName)
 				urlDnsmasq := fmt.Sprintf("https://github.com/%s/raw/publish/dnsmasq/%s.conf", os.Getenv("GITHUB_REPOSITORY"), targetName)
@@ -473,9 +541,13 @@ func GenerateReport(results map[string]*ProcessedResult, cfg *Config) {
 	if cfg.Global.SplitCNIP {
 		var cnipRows []ReportRow
 		for _, cat := range cfg.Categories {
-			if cat.Name != "cn" { continue }
+			if cat.Name != "cn" {
+				continue
+			}
 			r, ok := results[cat.Name]
-			if !ok { continue }
+			if !ok {
+				continue
+			}
 
 			catOut := ResolveClients(cfg.Global, cat)
 
@@ -483,7 +555,7 @@ func GenerateReport(results map[string]*ProcessedResult, cfg *Config) {
 				txtFile := fmt.Sprintf("publish/cnip/%s.txt", name)
 				srsFile := fmt.Sprintf("publish/cnip/%s.srs", name)
 				mrsFile := fmt.Sprintf("publish/cnip/%s.mrs", name)
-				
+
 				if anyFileExists(txtFile) {
 					var links []LinkDef
 					urlTxt := fmt.Sprintf("https://github.com/%s/raw/publish/cnip/%s.txt", os.Getenv("GITHUB_REPOSITORY"), name)
@@ -511,7 +583,7 @@ func GenerateReport(results map[string]*ProcessedResult, cfg *Config) {
 
 	sb.WriteString("\n" + endTag + "\n")
 	reportTitle := "# 📦 DIY-Ruleset 自动编译报告\n\n**该页面由 GitHub Actions 每日自动生成**\n\n"
-	
-	os.MkdirAll("publish", 0755) 
+
+	os.MkdirAll("publish", 0755)
 	_ = os.WriteFile("publish/README.md", []byte(reportTitle+sb.String()), 0644)
 }

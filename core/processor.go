@@ -27,23 +27,106 @@ func getCachedRegex(pattern string) *regexp.Regexp {
 }
 
 type ProcessedResult struct {
-	DomRules               map[string][]string
-	IPRules                map[string][]string
-	WhiteDomRules          map[string][]string
-	RawCount               int
-	AddCount               int
-	RmCount                int
-	FinalCount             int
-	WhiteCount             int
-	ExactCounts            map[string]int
-	UpstreamStats          map[string]int
-	WhiteUpstreamStats     map[string]int
-	RawAdblockRules        []string
-	RawDnsmasqRules        []string
-	RawSmartDNSRules       []string
-	RawWhiteAdblockRules   []string
-	RawWhiteDnsmasqRules   []string
-	RawWhiteSmartDNSRules  []string
+	DomRules              map[string][]string
+	IPRules               map[string][]string
+	WhiteDomRules         map[string][]string
+	RawCount              int
+	AddCount              int
+	RmCount               int
+	FinalCount            int
+	WhiteCount            int
+	ExactCounts           map[string]int
+	UpstreamStats         map[string]int
+	WhiteUpstreamStats    map[string]int
+	RawAdblockRules       []string
+	RawDnsmasqRules       []string
+	RawSmartDNSRules      []string
+	RawWhiteAdblockRules  []string
+	RawWhiteDnsmasqRules  []string
+	RawWhiteSmartDNSRules []string
+}
+
+type RuleMatcher struct {
+	keywords []string
+	regexes  []*regexp.Regexp
+	trie     *SuffixTrie
+}
+
+func NewRuleMatcher(rmKeywords map[string]bool, rmRegexes map[string]*regexp.Regexp, trie *SuffixTrie) *RuleMatcher {
+	matcher := &RuleMatcher{
+		trie:     trie,
+		keywords: make([]string, 0, len(rmKeywords)),
+		regexes:  make([]*regexp.Regexp, 0, len(rmRegexes)),
+	}
+	for kw := range rmKeywords {
+		matcher.keywords = append(matcher.keywords, kw)
+	}
+	for _, re := range rmRegexes {
+		matcher.regexes = append(matcher.regexes, re)
+	}
+	return matcher
+}
+
+func (m *RuleMatcher) cleanPatternForMatch(orig string) string {
+	if len(orig) > 1 && orig[0] == '^' {
+		orig = orig[1:]
+	}
+	if len(orig) > 1 && orig[len(orig)-1] == '$' {
+		orig = orig[:len(orig)-1]
+	}
+	if strings.HasPrefix(orig, `(.+\.)?`) {
+		orig = "+." + orig[7:]
+	} else if strings.HasPrefix(orig, `.+\.`) {
+		orig = "." + orig[4:]
+	}
+	if orig == ".*" || orig == "[^.]+" {
+		return "*"
+	}
+
+	orig = strings.ReplaceAll(orig, ".*", "*")
+	orig = strings.ReplaceAll(orig, "[^.]+", "*")
+	orig = strings.ReplaceAll(orig, `\.`, ".")
+	orig = strings.ReplaceAll(orig, `\\`, `\`)
+
+	return orig
+}
+
+func (m *RuleMatcher) IsCrossKilled(val string, ruleType string) bool {
+	checkVal := val
+	if ruleType == "DOMAIN-REGEX" || ruleType == "DOMAIN-WILDCARD" {
+		checkVal = m.cleanPatternForMatch(val)
+	}
+	for _, kw := range m.keywords {
+		if ruleType == "DOMAIN-KEYWORD" && val == kw {
+			continue
+		}
+		if strings.Contains(checkVal, kw) {
+			return true
+		}
+	}
+	if ruleType == "DOMAIN-KEYWORD" {
+		return false
+	}
+	if ruleType == "DOMAIN" {
+		if m.trie.MatchAnySuffix(checkVal) {
+			return true
+		}
+	} else {
+		if m.trie.MatchParentSuffix(checkVal) {
+			return true
+		}
+	}
+	if ruleType == "DOMAIN-SUFFIX" {
+		return false
+	}
+	if ruleType == "DOMAIN" {
+		for _, re := range m.regexes {
+			if re.MatchString(checkVal) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func ProcessCategory(cat Category, cfg *Config) *ProcessedResult {
@@ -54,7 +137,9 @@ func ProcessCategory(cat Category, cfg *Config) *ProcessedResult {
 	addExact := make(map[Rule]bool)
 	rmDomains, rmSuffixes, rmKeywords, rmRegexes, rmWildcards := make(map[string]bool), make(map[string]bool), make(map[string]bool), make(map[string]bool), make(map[string]bool)
 	whiteDomains, whiteSuffixes, whiteRegexes := make(map[string]bool), make(map[string]bool), make(map[string]bool)
+
 	ipv4Trie, ipv6Trie := &IPv4Trie{}, &IPv6Trie{}
+	seenRawRules := make(map[string]bool)
 
 	res := &ProcessedResult{
 		DomRules:              make(map[string][]string),
@@ -70,8 +155,6 @@ func ProcessCategory(cat Category, cfg *Config) *ProcessedResult {
 		RawWhiteSmartDNSRules: make([]string, 0),
 		ExactCounts:           make(map[string]int),
 	}
-
-	seenRawRules := make(map[string]bool)
 
 	processLine := func(line string, parserType string, isAdd bool, isRm bool, upURL string) {
 		cleanLine := strings.TrimSpace(line)
@@ -93,24 +176,41 @@ func ProcessCategory(cat Category, cfg *Config) *ProcessedResult {
 				}
 
 				if w := ParseWhite(cleanLine); w != nil {
-					if w.Type == "DOMAIN" { whiteDomains[w.Value] = true }
-					if w.Type == "DOMAIN-SUFFIX" { whiteSuffixes[w.Value] = true }
-					if w.Type == "DOMAIN-REGEX" { whiteRegexes[w.Value] = true }
-					if upURL != "" { res.WhiteUpstreamStats[upURL]++ }
+					if w.Type == "DOMAIN" {
+						whiteDomains[w.Value] = true
+					}
+					if w.Type == "DOMAIN-SUFFIX" {
+						whiteSuffixes[w.Value] = true
+					}
+					if w.Type == "DOMAIN-REGEX" {
+						whiteRegexes[w.Value] = true
+					}
+					if upURL != "" {
+						res.WhiteUpstreamStats[upURL]++
+					}
+
 					if !isAdd {
 						behavior := cat.WhiteBehavior
-						if behavior == "" { behavior = "remove" }
+						if behavior == "" {
+							behavior = "remove"
+						}
 						if behavior == "remove" {
 							res.RmCount++
 							rmExact[*w] = true
-							if w.Type == "DOMAIN" { rmDomains[w.Value] = true }
-							if w.Type == "DOMAIN-SUFFIX" { rmSuffixes[w.Value] = true }
-							if w.Type == "DOMAIN-REGEX" { rmRegexes[w.Value] = true }
+							if w.Type == "DOMAIN" {
+								rmDomains[w.Value] = true
+							}
+							if w.Type == "DOMAIN-SUFFIX" {
+								rmSuffixes[w.Value] = true
+							}
+							if w.Type == "DOMAIN-REGEX" {
+								rmRegexes[w.Value] = true
+							}
 						}
 					}
 				}
 			}
-			return 
+			return
 		}
 
 		if !isAdd && !isRm {
@@ -126,9 +226,8 @@ func ProcessCategory(cat Category, cfg *Config) *ProcessedResult {
 			}
 		}
 
-		isExactRm := false
-		isExactAdd := false
-		
+		isExactRm, isExactAdd := false, false
+
 		if isRm && strings.HasPrefix(cleanLine, "EXACT:") {
 			isExactRm = true
 			cleanLine = strings.TrimSpace(strings.TrimPrefix(cleanLine, "EXACT:"))
@@ -146,12 +245,24 @@ func ProcessCategory(cat Category, cfg *Config) *ProcessedResult {
 			res.RmCount++
 			rmExact[*r] = true
 			if !isExactRm {
-				if r.Type == "DOMAIN" { rmDomains[r.Value] = true }
-				if r.Type == "DOMAIN-SUFFIX" { rmSuffixes[r.Value] = true }
-				if r.Type == "DOMAIN-KEYWORD" { rmKeywords[r.Value] = true }
-				if r.Type == "DOMAIN-REGEX" { rmRegexes[r.Value] = true }
-				if r.Type == "DOMAIN-WILDCARD" { rmWildcards[r.Value] = true }
-				if r.Type == "IP-CIDR" || r.Type == "IP-CIDR6" { removeIP(r.Value, ipv4Trie, ipv6Trie) }
+				if r.Type == "DOMAIN" {
+					rmDomains[r.Value] = true
+				}
+				if r.Type == "DOMAIN-SUFFIX" {
+					rmSuffixes[r.Value] = true
+				}
+				if r.Type == "DOMAIN-KEYWORD" {
+					rmKeywords[r.Value] = true
+				}
+				if r.Type == "DOMAIN-REGEX" {
+					rmRegexes[r.Value] = true
+				}
+				if r.Type == "DOMAIN-WILDCARD" {
+					rmWildcards[r.Value] = true
+				}
+				if r.Type == "IP-CIDR" || r.Type == "IP-CIDR6" {
+					removeIP(r.Value, ipv4Trie, ipv6Trie)
+				}
 			}
 			return
 		}
@@ -159,11 +270,21 @@ func ProcessCategory(cat Category, cfg *Config) *ProcessedResult {
 		if isAdd {
 			res.AddCount++
 			if !isExactAdd {
-				if r.Type == "DOMAIN" { rmDomains[r.Value] = true }
-				if r.Type == "DOMAIN-SUFFIX" { rmSuffixes[r.Value] = true }
-				if r.Type == "DOMAIN-KEYWORD" { rmKeywords[r.Value] = true }
-				if r.Type == "DOMAIN-REGEX" { rmRegexes[r.Value] = true }
-				if r.Type == "DOMAIN-WILDCARD" { rmWildcards[r.Value] = true }
+				if r.Type == "DOMAIN" {
+					rmDomains[r.Value] = true
+				}
+				if r.Type == "DOMAIN-SUFFIX" {
+					rmSuffixes[r.Value] = true
+				}
+				if r.Type == "DOMAIN-KEYWORD" {
+					rmKeywords[r.Value] = true
+				}
+				if r.Type == "DOMAIN-REGEX" {
+					rmRegexes[r.Value] = true
+				}
+				if r.Type == "DOMAIN-WILDCARD" {
+					rmWildcards[r.Value] = true
+				}
 			} else {
 				addExact[*r] = true
 			}
@@ -201,14 +322,13 @@ func ProcessCategory(cat Category, cfg *Config) *ProcessedResult {
 				currentEgernSection = strings.TrimSuffix(trimmed, ":")
 				continue
 			}
-			
+
 			cleanLine := strings.TrimSpace(line)
 			if cleanLine == "" || strings.HasPrefix(cleanLine, "#") || strings.HasPrefix(cleanLine, "!") || strings.HasPrefix(cleanLine, "//") {
 				continue
 			}
-			
-			r := ParseEgern(line, currentEgernSection)
-			if r != nil {
+
+			if r := ParseEgern(line, currentEgernSection); r != nil {
 				res.RawCount++
 				switch r.Type {
 				case "DOMAIN":
@@ -225,6 +345,9 @@ func ProcessCategory(cat Category, cfg *Config) *ProcessedResult {
 					others[*r] = true
 				}
 			}
+		}
+		if err := scanner.Err(); err != nil {
+			fmt.Printf("⚠️ 读取 Egern 上游时出错: %v\n", err)
 		}
 		if upURL != "" {
 			res.UpstreamStats[upURL] += res.RawCount - linesBefore
@@ -247,6 +370,9 @@ func ProcessCategory(cat Category, cfg *Config) *ProcessedResult {
 					linesBefore := res.RawCount
 					for scanner.Scan() {
 						processLine(scanner.Text(), parserType, false, false, up.URL)
+					}
+					if err := scanner.Err(); err != nil {
+						fmt.Printf("⚠️ 读取上游文件 [%s] 时出错: %v\n", up.URL, err)
 					}
 					res.UpstreamStats[up.URL] += res.RawCount - linesBefore
 				}
@@ -278,7 +404,6 @@ func ProcessCategory(cat Category, cfg *Config) *ProcessedResult {
 		}
 
 		parserType := "clash"
-		
 		if eqIdx := strings.Index(cleanLine, "="); eqIdx != -1 {
 			prefix := strings.ToLower(strings.TrimSpace(cleanLine[:eqIdx]))
 			if validLocalParsers[prefix] {
@@ -286,7 +411,6 @@ func ProcessCategory(cat Category, cfg *Config) *ProcessedResult {
 				cleanLine = strings.TrimSpace(cleanLine[eqIdx+1:])
 			}
 		}
-
 		processLine(cleanLine, parserType, isAdd, isRm, source)
 	}
 
@@ -294,6 +418,9 @@ func ProcessCategory(cat Category, cfg *Config) *ProcessedResult {
 		scanner := bufio.NewScanner(f)
 		for scanner.Scan() {
 			processLocalLine(scanner.Text(), true, false, "Local Add")
+		}
+		if err := scanner.Err(); err != nil {
+			fmt.Printf("⚠️ 读取 add/%s.list 时出错: %v\n", cat.Name, err)
 		}
 		f.Close()
 	}
@@ -303,6 +430,9 @@ func ProcessCategory(cat Category, cfg *Config) *ProcessedResult {
 		for scanner.Scan() {
 			processLocalLine(scanner.Text(), false, true, "Local Remove")
 		}
+		if err := scanner.Err(); err != nil {
+			fmt.Printf("⚠️ 读取 remove/%s.list 时出错: %v\n", cat.Name, err)
+		}
 		f.Close()
 	}
 
@@ -310,14 +440,15 @@ func ProcessCategory(cat Category, cfg *Config) *ProcessedResult {
 		filePath := fmt.Sprintf("%s/rm_%s_%d.txt", "temp/raw", cat.Name, i+1)
 		if f, err := os.Open(filePath); err == nil {
 			scanner := bufio.NewScanner(f)
-
 			parserType := rmUp.Parser
 			if parserType == "" {
 				parserType = InferParser(filePath)
 			}
-			
 			for scanner.Scan() {
 				processLine(scanner.Text(), parserType, false, true, "Remote Remove")
+			}
+			if err := scanner.Err(); err != nil {
+				fmt.Printf("⚠️ 读取远程剔除文件时出错: %v\n", err)
 			}
 			f.Close()
 		}
@@ -346,83 +477,53 @@ func ProcessCategory(cat Category, cfg *Config) *ProcessedResult {
 		}
 	}
 
-	cleanPatternForMatch := func(r string) string {
-		orig := r
-		if len(orig) > 1 && orig[0] == '^' { orig = orig[1:] }
-		if len(orig) > 1 && orig[len(orig)-1] == '$' { orig = orig[:len(orig)-1] }
-		if strings.HasPrefix(orig, `(.+\.)?`) { orig = "+." + orig[7:] } else if strings.HasPrefix(orig, `.+\.`) { orig = "." + orig[4:] }
-		if orig == ".*" || orig == "[^.]+" { orig = "*" }
-		orig = strings.ReplaceAll(orig, ".*", "*")
-		orig = strings.ReplaceAll(orig, "[^.]+", "*")
-		orig = strings.ReplaceAll(orig, `\.`, ".")
-		orig = strings.ReplaceAll(orig, `\\`, `\`)
-		return orig
-	}
-
-	isCrossKilled := func(val string, ruleType string) bool {
-		checkVal := val
-		if ruleType == "DOMAIN-REGEX" || ruleType == "DOMAIN-WILDCARD" {
-			checkVal = cleanPatternForMatch(val)
-		}
-		for kw := range rmKeywords {
-			if ruleType == "DOMAIN-KEYWORD" && val == kw { continue } 
-			if strings.Contains(checkVal, kw) { return true }
-		}
-		if ruleType == "DOMAIN-KEYWORD" { 
-			return false 
-		}
-		if ruleType == "DOMAIN" {
-			if suffixTrie.MatchAnySuffix(checkVal) { return true }
-		} else {
-			if suffixTrie.MatchParentSuffix(checkVal) { return true }
-		}
-		if ruleType == "DOMAIN-SUFFIX" { 
-			return false 
-		}
-		if ruleType == "DOMAIN" {
-			for _, re := range compiledRmRegexesMap {
-				if re.MatchString(checkVal) { return true }
-			}
-		}
-
-		return false
-	}
+	matcher := NewRuleMatcher(rmKeywords, compiledRmRegexesMap, suffixTrie)
 
 	for d := range domains {
-		if rmExact[Rule{"DOMAIN", d}] { continue }
-		if !isCrossKilled(d, "DOMAIN") {
+		if rmExact[Rule{"DOMAIN", d}] {
+			continue
+		}
+		if !matcher.IsCrossKilled(d, "DOMAIN") {
 			res.DomRules["DOMAIN"] = append(res.DomRules["DOMAIN"], d)
 		}
 	}
 	for s := range suffixes {
-		if rmExact[Rule{"DOMAIN-SUFFIX", s}] { continue }
-		if !isCrossKilled(s, "DOMAIN-SUFFIX") {
+		if rmExact[Rule{"DOMAIN-SUFFIX", s}] {
+			continue
+		}
+		if !matcher.IsCrossKilled(s, "DOMAIN-SUFFIX") {
 			res.DomRules["DOMAIN-SUFFIX"] = append(res.DomRules["DOMAIN-SUFFIX"], s)
 		}
 	}
 	for r := range regexes {
-		if rmExact[Rule{"DOMAIN-REGEX", r}] { continue }
-		if !isCrossKilled(r, "DOMAIN-REGEX") {
+		if rmExact[Rule{"DOMAIN-REGEX", r}] {
+			continue
+		}
+		if !matcher.IsCrossKilled(r, "DOMAIN-REGEX") {
 			res.DomRules["DOMAIN-REGEX"] = append(res.DomRules["DOMAIN-REGEX"], r)
 		}
 	}
 	for k := range keywords {
-		if rmExact[Rule{"DOMAIN-KEYWORD", k}] { continue }
-		if !isCrossKilled(k, "DOMAIN-KEYWORD") {
+		if rmExact[Rule{"DOMAIN-KEYWORD", k}] {
+			continue
+		}
+		if !matcher.IsCrossKilled(k, "DOMAIN-KEYWORD") {
 			res.DomRules["DOMAIN-KEYWORD"] = append(res.DomRules["DOMAIN-KEYWORD"], k)
 		}
 	}
 	for w := range wildcards {
-		if rmExact[Rule{"DOMAIN-WILDCARD", w}] { continue }
-		if !isCrossKilled(w, "DOMAIN-WILDCARD") {
+		if rmExact[Rule{"DOMAIN-WILDCARD", w}] {
+			continue
+		}
+		if !matcher.IsCrossKilled(w, "DOMAIN-WILDCARD") {
 			res.DomRules["DOMAIN-WILDCARD"] = append(res.DomRules["DOMAIN-WILDCARD"], w)
 		}
 	}
 	for o := range others {
-		if rmExact[o] { continue }
-		
+		if rmExact[o] {
+			continue
+		}
 		t, v := o.Type, o.Value
-		
 		if t == "PROCESS-NAME" || t == "PROCESS-PATH" || t == "USER-AGENT" || t == "URL-REGEX" {
 			res.DomRules[t] = append(res.DomRules[t], v)
 		} else {
@@ -437,12 +538,10 @@ func ProcessCategory(cat Category, cfg *Config) *ProcessedResult {
 	for s := range whiteSuffixes {
 		whiteSuffixTrie.Insert(s)
 	}
-	isWhiteDomKilled := func(d string) bool {
-		return whiteSuffixTrie.MatchAnySuffix(d)
-	}
-	isWhiteSufKilled := func(s string) bool {
-		return whiteSuffixTrie.MatchParentSuffix(s)
-	}
+
+	isWhiteDomKilled := func(d string) bool { return whiteSuffixTrie.MatchAnySuffix(d) }
+	isWhiteSufKilled := func(s string) bool { return whiteSuffixTrie.MatchParentSuffix(s) }
+
 	for d := range whiteDomains {
 		if !isWhiteDomKilled(d) {
 			res.WhiteDomRules["DOMAIN"] = append(res.WhiteDomRules["DOMAIN"], d)
@@ -491,7 +590,7 @@ func ProcessCategory(cat Category, cfg *Config) *ProcessedResult {
 		}
 	}
 
-	fmt.Printf("Processed category: %s | Final count: %d\n", cat.Name, res.FinalCount)
+	fmt.Printf("⚙️ 已处理规则集: %-15s | 最终规则数: %d\n", cat.Name, res.FinalCount)
 	return res
 }
 
@@ -519,7 +618,6 @@ func (t *IPv4Trie) Insert(ip uint32, length, depth int) {
 		t.child[0], t.child[1] = nil, nil
 	}
 }
-
 func (t *IPv4Trie) Remove(ip uint32, length, depth int) {
 	if t == nil {
 		return
@@ -531,15 +629,13 @@ func (t *IPv4Trie) Remove(ip uint32, length, depth int) {
 	}
 	if t.isLeaf {
 		t.isLeaf = false
-		t.child[0] = &IPv4Trie{isLeaf: true}
-		t.child[1] = &IPv4Trie{isLeaf: true}
+		t.child[0], t.child[1] = &IPv4Trie{isLeaf: true}, &IPv4Trie{isLeaf: true}
 	}
 	bit := (ip >> (31 - depth)) & 1
 	if t.child[bit] != nil {
 		t.child[bit].Remove(ip, length, depth+1)
 	}
 }
-
 func (t *IPv4Trie) Walk(val uint32, depth int, out *map[string][]string) {
 	if t == nil {
 		return
@@ -581,7 +677,6 @@ func (t *IPv6Trie) Insert(ip [16]byte, length, depth int) {
 		t.child[0], t.child[1] = nil, nil
 	}
 }
-
 func (t *IPv6Trie) Remove(ip [16]byte, length, depth int) {
 	if t == nil {
 		return
@@ -593,15 +688,13 @@ func (t *IPv6Trie) Remove(ip [16]byte, length, depth int) {
 	}
 	if t.isLeaf {
 		t.isLeaf = false
-		t.child[0] = &IPv6Trie{isLeaf: true}
-		t.child[1] = &IPv6Trie{isLeaf: true}
+		t.child[0], t.child[1] = &IPv6Trie{isLeaf: true}, &IPv6Trie{isLeaf: true}
 	}
 	bit := (ip[depth/8] >> (7 - (depth % 8))) & 1
 	if t.child[bit] != nil {
 		t.child[bit].Remove(ip, length, depth+1)
 	}
 }
-
 func (t *IPv6Trie) Walk(val [16]byte, depth int, out *map[string][]string) {
 	if t == nil {
 		return
@@ -624,7 +717,6 @@ func IP4ToUint32(addr netip.Addr) uint32 {
 	b := addr.As4()
 	return uint32(b[0])<<24 | uint32(b[1])<<16 | uint32(b[2])<<8 | uint32(b[3])
 }
-
 func insertIP(val string, t4 *IPv4Trie, t6 *IPv6Trie) {
 	if p, err := netip.ParsePrefix(strings.Split(val, ",")[0]); err == nil {
 		if p.Addr().Is4() {
@@ -634,7 +726,6 @@ func insertIP(val string, t4 *IPv4Trie, t6 *IPv6Trie) {
 		}
 	}
 }
-
 func removeIP(val string, t4 *IPv4Trie, t6 *IPv6Trie) {
 	if p, err := netip.ParsePrefix(strings.Split(val, ",")[0]); err == nil {
 		if p.Addr().Is4() {
@@ -650,10 +741,7 @@ type SuffixTrie struct {
 	children map[string]*SuffixTrie
 }
 
-func NewSuffixTrie() *SuffixTrie {
-	return &SuffixTrie{children: make(map[string]*SuffixTrie)}
-}
-
+func NewSuffixTrie() *SuffixTrie { return &SuffixTrie{children: make(map[string]*SuffixTrie)} }
 func (t *SuffixTrie) Insert(suffix string) {
 	if suffix == "" {
 		return
@@ -678,7 +766,6 @@ func (t *SuffixTrie) Insert(suffix string) {
 	}
 	curr.isEnd = true
 }
-
 func (t *SuffixTrie) MatchAnySuffix(domain string) bool {
 	if domain == "" {
 		return false
@@ -705,7 +792,6 @@ func (t *SuffixTrie) MatchAnySuffix(domain string) bool {
 	}
 	return false
 }
-
 func (t *SuffixTrie) MatchParentSuffix(suffix string) bool {
 	if suffix == "" {
 		return false

@@ -192,7 +192,7 @@ func ResolveClients(global GlobalConfig, cat Category) ResolvedClientConfig {
 
 func (cfg *Config) Validate() error {
 	if len(cfg.Categories) == 0 {
-		return fmt.Errorf("categories list cannot be empty")
+		return fmt.Errorf("❌ 规则集 (categories) 列表不能为空")
 	}
 
 	validParsers := map[string]bool{
@@ -207,23 +207,23 @@ func (cfg *Config) Validate() error {
 	for i, cat := range cfg.Categories {
 		name := strings.TrimSpace(cat.Name)
 		if name == "" {
-			return fmt.Errorf("category at index %d is missing a name", i+1)
+			return fmt.Errorf("❌ 索引为 %d 的规则集缺少 name 属性", i+1)
 		}
 		if catNames[name] {
-			return fmt.Errorf("duplicate category name detected: [%s]", name)
+			return fmt.Errorf("❌ 检测到重复的规则集名称: [%s]", name)
 		}
 		catNames[name] = true
 
 		if cat.WhiteBehavior != "" && cat.WhiteBehavior != "remove" && cat.WhiteBehavior != "extract_only" {
-			return fmt.Errorf("[%s] white_behavior must be 'remove' or 'extract_only'", name)
+			return fmt.Errorf("❌ [%s] white_behavior 必须是 'remove' 或 'extract_only'", name)
 		}
 
 		for j, up := range cat.Upstreams {
 			if strings.TrimSpace(up.URL) == "" {
-				return fmt.Errorf("[%s] upstream at index %d is missing a url", name, j+1)
+				return fmt.Errorf("❌ [%s] 索引为 %d 的上游缺失 url", name, j+1)
 			}
 			if up.Parser != "" && !validParsers[up.Parser] {
-				return fmt.Errorf("[%s] upstream at index %d has invalid parser: %s", name, j+1, up.Parser)
+				return fmt.Errorf("❌ [%s] 索引为 %d 的上游 parser 无效: %s", name, j+1, up.Parser)
 			}
 		}
 	}
@@ -231,7 +231,7 @@ func (cfg *Config) Validate() error {
 	for _, cat := range cfg.Categories {
 		for _, mergeTarget := range cat.MergeFrom {
 			if !catNames[mergeTarget] {
-				return fmt.Errorf("[%s] attempting to merge a non-existent category (merge_from: %s)", cat.Name, mergeTarget)
+				return fmt.Errorf("❌ [%s] 试图合并一个不存在的规则集 (merge_from: %s)", cat.Name, mergeTarget)
 			}
 		}
 	}

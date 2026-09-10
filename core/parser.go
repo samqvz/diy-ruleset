@@ -1,6 +1,8 @@
 package core
 
 import (
+	"bufio"
+	"fmt"
 	"net/netip"
 	"os"
 	"regexp"
@@ -30,25 +32,20 @@ var (
 
 func Parse(line, format string) *Rule {
 	line = strings.TrimSpace(line)
-	if strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") || strings.HasPrefix(line, "!") || strings.HasPrefix(line, ";") || strings.HasPrefix(line, "[") {
+	if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") || strings.HasPrefix(line, "!") || strings.HasPrefix(line, ";") || strings.HasPrefix(line, "[") {
 		return nil
 	}
-	if idx := strings.Index(line, " #"); idx != -1 {
-		line = strings.TrimSpace(line[:idx])
-	} else if idx := strings.Index(line, "\t#"); idx != -1 {
-		line = strings.TrimSpace(line[:idx])
-	}
-	if idx := strings.Index(line, " //"); idx != -1 {
-		line = strings.TrimSpace(line[:idx])
-	} else if idx := strings.Index(line, "\t//"); idx != -1 {
-		line = strings.TrimSpace(line[:idx])
+
+	for _, commentMark := range []string{" #", "\t#", " //", "\t//"} {
+		if idx := strings.Index(line, commentMark); idx != -1 {
+			line = strings.TrimSpace(line[:idx])
+		}
 	}
 	if line == "" {
 		return nil
 	}
 
 	var r *Rule
-
 	switch format {
 	case "clash":
 		r = ParseClash(line)
@@ -71,10 +68,94 @@ func Parse(line, format string) *Rule {
 	default:
 		r = ParseClash(line)
 	}
+
 	if r != nil && (r.Type == "DOMAIN" || r.Type == "DOMAIN-SUFFIX" || r.Type == "DOMAIN-KEYWORD") {
 		r.Value = strings.ToLower(r.Value)
 	}
 	return r
+}
+
+func InferParser(filePath string) string {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return "clash"
+	}
+	defer f.Close()
+
+	scores := make(map[string]int)
+	scoreLine := func(line string) {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") || strings.HasPrefix(line, "!") {
+			return
+		}
+
+		if inferAdblockRe.MatchString(line) {
+			scores["adblock"] += 10
+		} else if inferHostsRe.MatchString(line) {
+			scores["hosts"] += 10
+		} else if inferDnsmasqRe.MatchString(line) {
+			scores["dnsmasq"] += 10
+		} else if inferSmartdnsRe.MatchString(line) {
+			scores["smartdns"] += 10
+		} else if inferEgernRe.MatchString(line) {
+			scores["egern"] += 100
+		} else if inferV2rayRe.MatchString(line) {
+			scores["v2ray"] += 10
+		} else if inferQxStrictRe.MatchString(line) {
+			scores["quantumultx"] += 100
+		} else if inferSurgeStrictRe.MatchString(line) {
+			scores["surge"] += 100
+		} else if inferClashStrictRe.MatchString(line) || line == "payload:" || strings.HasPrefix(line, "- ") {
+			scores["clash"] += 100
+		} else if inferGenericRe.MatchString(line) {
+			scores["clash"] += 1
+			scores["surge"] += 1
+			scores["shadowrocket"] += 1
+		} else if inferIPRe.MatchString(line) {
+			scores["clash"] += 1
+		}
+	}
+
+	const checkLimit = 500
+	scanner := bufio.NewScanner(f)
+
+	rollingTail := make([]string, checkLimit)
+	tailIdx := 0
+	totalLines := 0
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if totalLines < checkLimit {
+			scoreLine(line)
+		}
+		rollingTail[tailIdx] = line
+		tailIdx = (tailIdx + 1) % checkLimit
+		totalLines++
+	}
+	if err := scanner.Err(); err != nil {
+		fmt.Printf("⚠️ 推断文件格式时发生读取错误: %v\n", err)
+	}
+
+	tailStart := totalLines - checkLimit
+	if tailStart < checkLimit {
+		tailStart = checkLimit
+	}
+
+	linesToCheck := totalLines - tailStart
+	for i := 0; i < linesToCheck; i++ {
+		idx := (tailIdx - linesToCheck + i + checkLimit) % checkLimit
+		scoreLine(rollingTail[idx])
+	}
+
+	bestParser := "clash"
+	maxScore := 0
+	for parser, score := range scores {
+		if score > maxScore {
+			maxScore = score
+			bestParser = parser
+		}
+	}
+	return bestParser
 }
 
 func ParseClash(line string) *Rule {
@@ -83,6 +164,7 @@ func ParseClash(line string) *Rule {
 		line = strings.TrimSpace(line[2:])
 	}
 	line = strings.Trim(line, "'\"\t ")
+
 	if line == "payload:" || line == "" {
 		return nil
 	}
@@ -120,10 +202,14 @@ func ParseEgern(line string, section string) *Rule {
 	case "domain_regex_set":
 		return &Rule{Type: "DOMAIN-REGEX", Value: line}
 	case "ip_cidr_set":
-		if !strings.Contains(line, "/") { line += "/32" }
+		if !strings.Contains(line, "/") {
+			line += "/32"
+		}
 		return &Rule{Type: "IP-CIDR", Value: line}
 	case "ip_cidr6_set":
-		if !strings.Contains(line, "/") { line += "/128" }
+		if !strings.Contains(line, "/") {
+			line += "/128"
+		}
 		return &Rule{Type: "IP-CIDR6", Value: line}
 	case "asn_set":
 		return &Rule{Type: "IP-ASN", Value: line}
@@ -149,24 +235,22 @@ func ParseV2Ray(line string) *Rule {
 	if r := parseIPOrCIDR(line); r != nil {
 		return r
 	}
-	if strings.HasPrefix(line, "full:") {
+
+	switch {
+	case strings.HasPrefix(line, "full:"):
 		return &Rule{"DOMAIN", strings.TrimPrefix(line, "full:")}
-	}
-	if strings.HasPrefix(line, "domain:") {
+	case strings.HasPrefix(line, "domain:"):
 		return &Rule{"DOMAIN-SUFFIX", strings.TrimPrefix(line, "domain:")}
-	}
-	if strings.HasPrefix(line, "keyword:") {
+	case strings.HasPrefix(line, "keyword:"):
 		return &Rule{"DOMAIN-KEYWORD", strings.TrimPrefix(line, "keyword:")}
-	}
-	if strings.HasPrefix(line, "regexp:") {
+	case strings.HasPrefix(line, "regexp:"):
 		return &Rule{"DOMAIN-REGEX", strings.TrimPrefix(line, "regexp:")}
-	}
-	if strings.HasPrefix(line, "regex:") {
+	case strings.HasPrefix(line, "regex:"):
 		return &Rule{"DOMAIN-REGEX", strings.TrimPrefix(line, "regex:")}
-	}
-	if strings.HasPrefix(line, ".") {
+	case strings.HasPrefix(line, "."):
 		return &Rule{"DOMAIN-SUFFIX", strings.TrimPrefix(line, ".")}
 	}
+
 	if nakedDomainRegex.MatchString(line) {
 		return &Rule{"DOMAIN-KEYWORD", line}
 	}
@@ -194,7 +278,6 @@ func ParseAdblock(line string) *Rule {
 		if adblockDomainRegex.MatchString(val) {
 			return &Rule{"DOMAIN-SUFFIX", val}
 		}
-		return nil
 	}
 	return nil
 }
@@ -219,9 +302,8 @@ func normalizeClashWildcard(domain string, expectedType string) *Rule {
 		newVal = strings.ReplaceAll(newVal, "*", `[^.]+`)
 		if expectedType == "DOMAIN-SUFFIX" {
 			return &Rule{"DOMAIN-REGEX", "^(.+\\.)?" + newVal + "$"}
-		} else {
-			return &Rule{"DOMAIN-REGEX", "^" + newVal + "$"}
 		}
+		return &Rule{"DOMAIN-REGEX", "^" + newVal + "$"}
 	}
 	return nil
 }
@@ -234,29 +316,33 @@ func parseStandardClash(line string) *Rule {
 	t := strings.ToUpper(strings.TrimSpace(line[:idx]))
 	v := strings.TrimSpace(line[idx+1:])
 	v = strings.Trim(v, "'\"\t ")
+
 	parts := strings.Split(v, ",")
 	cleanV := strings.TrimSpace(parts[0])
-	if t == "HOST" {
+
+	switch t {
+	case "HOST":
 		t = "DOMAIN"
-	} else if t == "HOST-SUFFIX" {
+	case "HOST-SUFFIX":
 		t = "DOMAIN-SUFFIX"
-	} else if t == "HOST-KEYWORD" {
+	case "HOST-KEYWORD":
 		t = "DOMAIN-KEYWORD"
-	} else if t == "HOST-WILDCARD" {
+	case "HOST-WILDCARD":
 		t = "DOMAIN-WILDCARD"
-	} else if t == "DEST-PORT" || t == "PORT" {
+	case "DEST-PORT", "PORT":
 		t = "DST-PORT"
-	} else if t == "IP4-CIDR" {
+	case "IP4-CIDR":
 		t = "IP-CIDR"
-	} else if t == "IP6-CIDR" {
+	case "IP6-CIDR":
 		t = "IP-CIDR6"
 	}
+
 	valid := map[string]bool{
-		"DOMAIN": true, "DOMAIN-SUFFIX": true, "DOMAIN-KEYWORD": true, "DOMAIN-REGEX": true, 
-		"DOMAIN-WILDCARD": true, "URL-REGEX": true, 
-		"IP-CIDR": true, "IP-CIDR6": true, 
+		"DOMAIN": true, "DOMAIN-SUFFIX": true, "DOMAIN-KEYWORD": true, "DOMAIN-REGEX": true,
+		"DOMAIN-WILDCARD": true, "URL-REGEX": true, "IP-CIDR": true, "IP-CIDR6": true,
 		"DST-PORT": true, "PROCESS-NAME": true, "PROCESS-PATH": true, "USER-AGENT": true, "IP-ASN": true,
 	}
+
 	if valid[t] {
 		if t == "DOMAIN-REGEX" {
 			cleanV = v
@@ -268,7 +354,7 @@ func parseStandardClash(line string) *Rule {
 			}
 			return &Rule{Type: t, Value: cleanV}
 		}
-		if (t == "DOMAIN" || t == "DOMAIN-SUFFIX") {
+		if t == "DOMAIN" || t == "DOMAIN-SUFFIX" {
 			if r := normalizeClashWildcard(cleanV, t); r != nil {
 				return r
 			}
@@ -294,6 +380,7 @@ func parseFallback(line string) *Rule {
 	if nakedDomainRegex.MatchString(line) {
 		return &Rule{"DOMAIN", line}
 	}
+
 	if matches := hostsRegex.FindStringSubmatch(line); len(matches) > 1 {
 		domain := matches[1]
 		if isValidHostsDomain(domain) {
@@ -344,6 +431,7 @@ func ParseWhite(line string) *Rule {
 	if !strings.HasPrefix(line, "@@") {
 		return nil
 	}
+
 	val := line[2:]
 	if strings.HasPrefix(val, "||") && strings.HasSuffix(val, "^") {
 		clean := val[2 : len(val)-1]
@@ -408,61 +496,10 @@ func ParseAppleClients(line string) *Rule {
 		}
 		return nil
 	}
-	parts := strings.Split(line, ",")
+
+	parts := strings.SplitN(line, ",", 3)
 	if len(parts) >= 2 {
 		line = strings.TrimSpace(parts[0]) + "," + strings.TrimSpace(parts[1])
 	}
 	return parseStandardClash(line)
-}
-
-func InferParser(filePath string) string {
-	data, err := os.ReadFile(filePath)
-	if err != nil {
-		return "clash"
-	}
-	lines := strings.Split(string(data), "\n")
-	scores := make(map[string]int)
-	scoreLine := func(line string) {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") || strings.HasPrefix(line, "!") {
-			return
-		}
-		if inferAdblockRe.MatchString(line) { scores["adblock"] += 10 } else 
-		if inferHostsRe.MatchString(line) { scores["hosts"] += 10 } else 
-		if inferDnsmasqRe.MatchString(line) { scores["dnsmasq"] += 10 } else 
-		if inferSmartdnsRe.MatchString(line) { scores["smartdns"] += 10 } else 
-		if inferEgernRe.MatchString(line) { scores["egern"] += 100 } else 
-		if inferV2rayRe.MatchString(line) { scores["v2ray"] += 10 } else 
-		if inferQxStrictRe.MatchString(line) { scores["quantumultx"] += 100 } else 
-		if inferSurgeStrictRe.MatchString(line) { scores["surge"] += 100 } else 
-		if inferClashStrictRe.MatchString(line) || line == "payload:" || strings.HasPrefix(line, "- ") { scores["clash"] += 100 } else 
-		if inferGenericRe.MatchString(line) {
-			scores["clash"] += 1; scores["surge"] += 1; scores["shadowrocket"] += 1
-		} else if inferIPRe.MatchString(line) {
-			scores["clash"] += 1
-		}
-	}
-	headLimit := 500
-	if len(lines) < headLimit {
-		headLimit = len(lines)
-	}
-	for i := 0; i < headLimit; i++ {
-		scoreLine(lines[i])
-	}
-	tailStart := len(lines) - 500
-	if tailStart < headLimit {
-		tailStart = headLimit
-	}
-	for i := tailStart; i < len(lines); i++ {
-		scoreLine(lines[i])
-	}
-	bestParser := "clash"
-	maxScore := 0
-	for parser, score := range scores {
-		if score > maxScore {
-			maxScore = score
-			bestParser = parser
-		}
-	}
-	return bestParser
 }

@@ -57,14 +57,14 @@ jobs:
       - name: Download Cores
         if: steps.cache-cores.outputs.cache-hit != 'true'
         run: |
-          echo "Downloading sing-box v${{ env.singbox_ver }}..."
+          echo "⏬ 正在下载 sing-box v${{ env.singbox_ver }}..."
           curl -fL "https://github.com/SagerNet/sing-box/releases/download/v${{ env.singbox_ver }}/sing-box-${{ env.singbox_ver }}-linux-amd64.tar.gz" -o sing-box.tar.gz
           tar -zxf sing-box.tar.gz
           mv sing-box-*/sing-box ./sing-box
           chmod +x ./sing-box
           rm sing-box.tar.gz
 
-          echo "Downloading mihomo ${{ env.mihomo_ver }}..."
+          echo "⏬ 正在下载 mihomo ${{ env.mihomo_ver }}..."
           curl -fL "https://github.com/MetaCubeX/mihomo/releases/download/Prerelease-Alpha/mihomo-linux-amd64-v3-go120-${{ env.mihomo_ver }}.gz" -o mihomo.gz
           gzip -d < mihomo.gz > ./mihomo
           chmod +x ./mihomo
@@ -80,7 +80,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "Executing Rule Engine..."
           go run main.go
 
       - name: Push Rules to publish branch
@@ -88,10 +87,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cd publish
-          git init
-          git checkout -b publish
+          git init -q
+          git checkout -q -b publish
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add .
-          git commit -m "Auto Build Rules on ${{ env.BUILDTIME }}" || echo "No changes to commit"
-          git push -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git" publish
+          git commit -q -m "Auto Build Rules on ${{ env.BUILDTIME }}" || echo "No changes to commit"
+          git push -q -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git" publish
