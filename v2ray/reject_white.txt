@@ -1,0 +1,11 @@
+domain:ad.10010.com
+domain:ad.abchina.com
+domain:ad.kazakinfo.com
+domain:ad.ourgame.com
+domain:adcdn.pingan.com
+domain:advert.kf5.com
+domain:api.ads.tvb.com
+domain:app-advertise.zhihuishu.com
+domain:buyad.bi-xenon.cn
+domain:captcha.su.baidu.com
+domain:img.ads.tvb.com
