@@ -9,6 +9,7 @@ on:
     paths:
       - 'config.yaml'
       - 'main.go'
+      - 'go.mod'
       - 'add/**'
       - 'remove/**'
       - 'core/**'
@@ -31,7 +32,8 @@ jobs:
       - name: Setup Go Environment
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22.0'
+          go-version-file: 'go.mod'   # 与 go.mod 保持一致，避免版本漂移
+          cache: true
 
       - name: Init Time & Get Core Versions
         env:
@@ -75,6 +77,11 @@ jobs:
           sudo cp ./sing-box /usr/local/bin/sing-box
           sudo cp ./mihomo /usr/local/bin/mihomo
           sudo chmod +x /usr/local/bin/sing-box /usr/local/bin/mihomo
+
+      - name: Vet & Test
+        run: |
+          go vet ./...
+          go test -race ./...
 
       - name: Execute Go Rule Engine
         env:

@@ -1,16 +1,33 @@
 global:
-  enable_gh_proxy: true
-  gh_proxy: "https://v6.gh-proxy.org/"
   split_cnip: true
-  singbox:      {enable: true, single_file: false, json: true, srs: true}
-  mihomo:       {enable: true, single_file: false, txt: false, yaml: true, mrs: true}
-  v2ray:        {enable: true, single_file: false}
-  surge:        {enable: true, single_file: true}
-  loon:         {enable: true, single_file: true}
-  stash:        {enable: true, single_file: true}
-  egern:        {enable: true, single_file: true}
-  shadowrocket: {enable: true, single_file: true}
-  quantumultx:  {enable: true, single_file: true}
+  enable_gh_proxy: {enable: true, gh_proxy: "https://v6.gh-proxy.org/"}
+  singbox:         {enable: true, single_file: false, json: true, srs: true}
+  mihomo:          {enable: true, single_file: false, txt: false, yaml: true, mrs: true}
+  v2ray:           {enable: true, single_file: false}
+  surge:           {enable: true, single_file: true}
+  loon:            {enable: true, single_file: true}
+  stash:           {enable: true, single_file: true}
+  egern:           {enable: true, single_file: true}
+  shadowrocket:    {enable: true, single_file: true}
+  quantumultx:     {enable: true, single_file: true}
+
+  geodata:
+    geosite:
+      enable: true
+#      upstreams: ["https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"]
+#      pick: [cn]          # 默认空=全部标签，不建议为空，没必要拉取上千个规则集，README.md报表顶不住
+#      exclude: []
+    geoip:
+      enable: true
+#      upstreams: ["https://raw.githubusercontent.com/Loyalsoldier/geoip/release/geoip.dat"]
+#      pick: [AS15169]             # 同上
+#      exclude: []
+    mmdb:
+      enable: true
+      only_asn: true      # false（默认）=与 geoip.dat 一致（国家/ASN/category）；true=仅写 ASN
+#      upstreams: ["https://raw.githubusercontent.com/Loyalsoldier/geoip/release/Country.mmdb"]
+#      pick: [AS13335]                # 同上
+#      exclude: []
 
 categories:
   - name: cn
@@ -19,6 +36,8 @@ categories:
     publish_smartdns: true              #仅作示例
     dnsmasq_server: "223.6.6.6"         #仅作示例
     smartdns_server: "china_group"      #仅作示例
+    remove_urls:
+      - {url: "https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/google.txt"}
     upstreams:
       - {url: "https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/direct.txt"}
       - {url: "https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/cncidr.txt"}
@@ -38,7 +57,7 @@ categories:
     publish_dnsmasq: true
     publish_smartdns: true
     remove_urls:
-      - {"https://raw.githubusercontent.com/217heidai/adblockfilters/refs/heads/main/rules/white.txt"}
+      - {url: "https://raw.githubusercontent.com/217heidai/adblockfilters/refs/heads/main/rules/white.txt"}
     upstreams:
       - {url: "https://anti-ad.net/clash.yaml"}
       - {url: "https://raw.githubusercontent.com/TG-Twilight/AWAvenue-Ads-Rule/main/Filters/AWAvenue-Ads-Rule-Clash-Classical.yaml"}
@@ -50,6 +69,7 @@ categories:
       - {url: "https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/google.txt"}
       - {url: "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Google/Google.list"}
       - {url: "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Gemini/Gemini.list"}
+      - {url: "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/YouTube/YouTube.list"}
       - {url: "https://raw.githubusercontent.com/VPSDance/ai-proxy-rules/refs/heads/main/rules/clash/google-ai.yaml"}
       - {url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/refs/heads/meta/geo/geosite/google.list"}
 

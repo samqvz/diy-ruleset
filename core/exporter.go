@@ -9,13 +9,14 @@ import (
 	"strings"
 )
 
+// SingboxRuleSet 是 sing-box rule-set 的 JSON 结构。
 type SingboxRuleSet struct {
 	Version int              `json:"version"`
 	Rules   []map[string]any `json:"rules"`
 }
 
 func toPortArray(vals []string) []any {
-	var res []any
+	res := make([]any, 0, len(vals))
 	for _, v := range vals {
 		if n, err := strconv.Atoi(v); err == nil {
 			res = append(res, n)
@@ -26,15 +27,16 @@ func toPortArray(vals []string) []any {
 	return res
 }
 
+// ensureDir / writeToFile 采用 fail-fast：产物缺失意味着构建不可用，直接中止。
 func ensureDir(path string) {
-	if err := os.MkdirAll(path, 0755); err != nil {
-		log.Fatalf("❌ 无法创建目录 [%s]: %v\n", path, err)
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		log.Fatalf("❌ 无法创建目录 [%s]: %v", path, err)
 	}
 }
 
 func writeToFile(path string, data []byte) {
-	if err := os.WriteFile(path, data, 0644); err != nil {
-		log.Fatalf("❌ 无法写入文件 [%s]: %v\n", path, err)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		log.Fatalf("❌ 无法写入文件 [%s]: %v", path, err)
 	}
 }
 
@@ -59,6 +61,7 @@ func countRules(dom map[string][]string, ip map[string][]string) int {
 	return c
 }
 
+// RuleExporter 承载单个规则集的导出上下文。
 type RuleExporter struct {
 	cat     Category
 	res     *ProcessedResult
@@ -68,17 +71,15 @@ type RuleExporter struct {
 	isWhite bool
 }
 
+// ExportFiles 按配置把规则集导出为各客户端格式。
 func ExportFiles(cat Category, res *ProcessedResult, cfg *Config, isWhite bool) {
-	ensureDir("process")
-	ensureDir("publish/singbox")
-	ensureDir("publish/mihomo")
-	ensureDir("publish/v2ray")
-	ensureDir("publish/surge")
-	ensureDir("publish/shadowrocket")
-	ensureDir("publish/quantumultx")
-	ensureDir("publish/loon")
-	ensureDir("publish/stash")
-	ensureDir("publish/egern")
+	for _, dir := range []string{
+		"process", "publish/singbox", "publish/mihomo", "publish/v2ray",
+		"publish/surge", "publish/shadowrocket", "publish/quantumultx",
+		"publish/loon", "publish/stash", "publish/egern",
+	} {
+		ensureDir(dir)
+	}
 
 	exporter := &RuleExporter{
 		cat:     cat,
@@ -99,18 +100,19 @@ func ExportFiles(cat Category, res *ProcessedResult, cfg *Config, isWhite bool) 
 	exporter.exportWhite()
 }
 
+// exportCNIP 仅针对 cn 规则集，拆出 CNIPv4/CNIPv6 独立文件（含 SRS/MRS）。
 func (e *RuleExporter) exportCNIP() {
 	if !(e.cfg.Global.SplitCNIP && e.catName == "cn") {
 		return
 	}
 	ensureDir("publish/cnip")
-	var ipv4, ipv6 []string
 
+	var ipv4, ipv6 []string
 	for _, ip := range e.res.IPRules["IP-CIDR"] {
-		ipv4 = append(ipv4, strings.Split(ip, ",")[0])
+		ipv4 = append(ipv4, firstField(ip))
 	}
 	for _, ip := range e.res.IPRules["IP-CIDR6"] {
-		ipv6 = append(ipv6, strings.Split(ip, ",")[0])
+		ipv6 = append(ipv6, firstField(ip))
 	}
 
 	writeCnipFiles := func(name string, ips []string) {
@@ -156,9 +158,10 @@ func (e *RuleExporter) exportSingbox() {
 			continue
 		}
 		if t == "URL-REGEX" || t == "USER-AGENT" {
-			continue
+			continue // sing-box 不支持
 		}
 		if t == "DOMAIN-WILDCARD" {
+			// sing-box 无 WILDCARD，转为正则（DOMAIN-WILDCARD 的 `*` 为"任意字符"，用 .*）
 			for _, v := range vals {
 				mergedDomRules["DOMAIN-REGEX"] = append(mergedDomRules["DOMAIN-REGEX"], wildcardToRegex(v))
 			}
@@ -181,7 +184,7 @@ func (e *RuleExporter) exportSingbox() {
 	srIP := SingboxRuleSet{Version: 5, Rules: []map[string]any{}}
 	srIP_SRS := SingboxRuleSet{Version: 5, Rules: []map[string]any{}}
 
-	var combinedIPs []string
+	combinedIPs := make([]string, 0, len(sbIPRules["IP-CIDR"])+len(sbIPRules["IP-CIDR6"]))
 	combinedIPs = append(combinedIPs, sbIPRules["IP-CIDR"]...)
 	combinedIPs = append(combinedIPs, sbIPRules["IP-CIDR6"]...)
 	if len(combinedIPs) > 0 {
@@ -191,20 +194,22 @@ func (e *RuleExporter) exportSingbox() {
 	}
 
 	for _, t := range ipKeys {
-		if vals, ok := sbIPRules[t]; ok && len(vals) > 0 {
-			sbKey := sbKeys[t]
-			if sbKey == "" {
-				continue
-			}
-			if t == "DST-PORT" {
-				srIP.Rules = append(srIP.Rules, map[string]any{sbKey: toPortArray(vals)})
-				srIP_SRS.Rules = append(srIP_SRS.Rules, map[string]any{sbKey: toPortArray(vals)})
-			} else {
-				srIP.Rules = append(srIP.Rules, map[string]any{sbKey: vals})
-				srIP_SRS.Rules = append(srIP_SRS.Rules, map[string]any{sbKey: vals})
-			}
-			hasIP = true
+		vals, ok := sbIPRules[t]
+		if !ok || len(vals) == 0 {
+			continue
 		}
+		sbKey := sbKeys[t]
+		if sbKey == "" {
+			continue
+		}
+		if t == "DST-PORT" {
+			srIP.Rules = append(srIP.Rules, map[string]any{sbKey: toPortArray(vals)})
+			srIP_SRS.Rules = append(srIP_SRS.Rules, map[string]any{sbKey: toPortArray(vals)})
+		} else {
+			srIP.Rules = append(srIP.Rules, map[string]any{sbKey: vals})
+			srIP_SRS.Rules = append(srIP_SRS.Rules, map[string]any{sbKey: vals})
+		}
+		hasIP = true
 	}
 
 	writeSb := func(name string, rs SingboxRuleSet, isIP bool, rsSRS SingboxRuleSet) {
@@ -254,26 +259,25 @@ func (e *RuleExporter) exportMihomo() {
 	hasDom, hasIP := false, false
 
 	for _, t := range domKeys {
-		if vals, ok := miDomRules[t]; ok && len(vals) > 0 {
-			if t == "URL-REGEX" || t == "USER-AGENT" {
-				continue
-			}
-			for _, v := range vals {
-				yamlDomLines = append(yamlDomLines, fmt.Sprintf("%s,%s", t, v))
-			}
-			hasDom = true
+		vals, ok := miDomRules[t]
+		if !ok || len(vals) == 0 {
+			continue
 		}
+		if t == "URL-REGEX" || t == "USER-AGENT" {
+			continue
+		}
+		for _, v := range vals {
+			yamlDomLines = append(yamlDomLines, fmt.Sprintf("%s,%s", t, v))
+		}
+		hasDom = true
 	}
 	if hasDom {
+		// mrs/domain 规则集使用 Clash 通配符语法：SUFFIX -> `+.`，其余原样
 		for _, s := range miDomRules["DOMAIN-SUFFIX"] {
 			txtDomLines = append(txtDomLines, "+."+s)
 		}
-		for _, d := range miDomRules["DOMAIN"] {
-			txtDomLines = append(txtDomLines, d)
-		}
-		for _, w := range miDomRules["DOMAIN-WILDCARD"] {
-			txtDomLines = append(txtDomLines, w)
-		}
+		txtDomLines = append(txtDomLines, miDomRules["DOMAIN"]...)
+		txtDomLines = append(txtDomLines, miDomRules["DOMAIN-WILDCARD"]...)
 		for _, r := range miDomRules["DOMAIN-REGEX"] {
 			w := toMihomoWildcard(r)
 			if w != "" && !strings.ContainsAny(w, "()[]|?^$") {
@@ -283,15 +287,17 @@ func (e *RuleExporter) exportMihomo() {
 	}
 
 	for _, k := range []string{"IP-CIDR", "IP-CIDR6", "DST-PORT", "IP-ASN"} {
-		if vals, ok := miIPRules[k]; ok && len(vals) > 0 {
-			for _, v := range vals {
-				yamlIPLines = append(yamlIPLines, fmt.Sprintf("%s,%s", k, v))
-				if k == "IP-CIDR" || k == "IP-CIDR6" {
-					txtIPLines = append(txtIPLines, strings.Split(v, ",")[0])
-				}
-			}
-			hasIP = true
+		vals, ok := miIPRules[k]
+		if !ok || len(vals) == 0 {
+			continue
 		}
+		for _, v := range vals {
+			yamlIPLines = append(yamlIPLines, fmt.Sprintf("%s,%s", k, v))
+			if k == "IP-CIDR" || k == "IP-CIDR6" {
+				txtIPLines = append(txtIPLines, firstField(v))
+			}
+		}
+		hasIP = true
 	}
 
 	writeMihomoUserFiles := func(name string, classicalLines []string) {
@@ -331,6 +337,7 @@ func (e *RuleExporter) exportMihomo() {
 	}
 }
 
+// exportDNS 生成 adblock / dnsmasq / smartdns 服务端格式。
 func (e *RuleExporter) exportDNS() {
 	if !(e.cat.PublishAdblock || e.cat.PublishDnsmasq || e.cat.PublishSmartDNS) {
 		return
@@ -470,12 +477,12 @@ func (e *RuleExporter) exportV2ray() {
 		}
 	}
 
-	var combinedIP []string
+	combinedIP := make([]string, 0, len(v2IPRules["IP-CIDR"])+len(v2IPRules["IP-CIDR6"]))
 	for _, ip := range v2IPRules["IP-CIDR"] {
-		combinedIP = append(combinedIP, strings.Split(ip, ",")[0])
+		combinedIP = append(combinedIP, firstField(ip))
 	}
 	for _, ip := range v2IPRules["IP-CIDR6"] {
-		combinedIP = append(combinedIP, strings.Split(ip, ",")[0])
+		combinedIP = append(combinedIP, firstField(ip))
 	}
 
 	e.res.ExactCounts["v2ray_dom"] = len(v2Lines)
@@ -497,8 +504,16 @@ func (e *RuleExporter) exportV2ray() {
 	}
 }
 
+// appleClient 描述一个 Apple 系客户端（Surge/Loon/QX/SR/Stash）的导出参数。
+type appleClient struct {
+	name       string
+	enable     bool
+	singleFile bool
+}
+
 func (e *RuleExporter) exportApple() {
-	buildAppleLines := func(clientName string, ruleName string) ([]string, []string) {
+	// buildAppleLines 按客户端差异裁剪/改写规则类型。
+	buildAppleLines := func(clientName string) ([]string, []string) {
 		appleDomRules, appleIPRules := e.res.DomRules, e.res.IPRules
 		var domLines, ipLines []string
 
@@ -528,7 +543,7 @@ func (e *RuleExporter) exportApple() {
 
 				suffix := ""
 				if clientName == "quantumultx" {
-					suffix = "," + ruleName
+					suffix = "," + e.catName
 				}
 				domLines = append(domLines, fmt.Sprintf("%s,%s%s", writeType, writeVal, suffix))
 			}
@@ -544,23 +559,21 @@ func (e *RuleExporter) exportApple() {
 						writeType = "DEST-PORT"
 					}
 				case "quantumultx":
-					if writeType == "DST-PORT" {
+					switch writeType {
+					case "DST-PORT":
 						writeType = "dest-port"
-					}
-					if writeType == "IP-CIDR" {
+					case "IP-CIDR":
 						writeType = "ip-cidr"
-					}
-					if writeType == "IP-CIDR6" {
+					case "IP-CIDR6":
 						writeType = "ip6-cidr"
-					}
-					if writeType == "IP-ASN" {
+					case "IP-ASN":
 						writeType = "ip-asn"
 					}
 				}
 
 				suffix := ""
 				if clientName == "quantumultx" {
-					suffix = "," + ruleName
+					suffix = "," + e.catName
 				} else if k == "IP-CIDR" || k == "IP-CIDR6" {
 					suffix = ",no-resolve"
 				}
@@ -570,11 +583,7 @@ func (e *RuleExporter) exportApple() {
 		return domLines, ipLines
 	}
 
-	writeAppleFiles := func(clientName string, enable bool, singleFile bool, domLines, ipLines []string) {
-		if !enable {
-			return
-		}
-
+	writeAppleFiles := func(clientName string, singleFile bool, domLines, ipLines []string) {
 		e.res.ExactCounts[clientName+"_dom"] = len(domLines)
 		e.res.ExactCounts[clientName+"_ip"] = len(ipLines)
 		e.res.ExactCounts[clientName+"_total"] = len(domLines) + len(ipLines)
@@ -594,11 +603,7 @@ func (e *RuleExporter) exportApple() {
 		}
 	}
 
-	clients := []struct {
-		name       string
-		enable     bool
-		singleFile bool
-	}{
+	clients := []appleClient{
 		{"surge", e.catOut.Surge.Enable, e.catOut.Surge.SingleFile},
 		{"shadowrocket", e.catOut.Shadowrocket.Enable, e.catOut.Shadowrocket.SingleFile},
 		{"loon", e.catOut.Loon.Enable, e.catOut.Loon.SingleFile},
@@ -607,10 +612,11 @@ func (e *RuleExporter) exportApple() {
 	}
 
 	for _, client := range clients {
-		if client.enable {
-			d, i := buildAppleLines(client.name, e.catName)
-			writeAppleFiles(client.name, true, client.singleFile, d, i)
+		if !client.enable {
+			continue
 		}
+		d, i := buildAppleLines(client.name)
+		writeAppleFiles(client.name, client.singleFile, d, i)
 	}
 }
 
@@ -679,47 +685,66 @@ func (e *RuleExporter) exportEgern() {
 	}
 }
 
+// exportWhite 把提取出的白名单作为一个 <cat>_white 规则集递归导出。
 func (e *RuleExporter) exportWhite() {
-	if e.cat.PublishWhite && len(e.res.WhiteDomRules) > 0 {
-		whiteCat := e.cat
-		whiteCat.Name = e.catName + "_white"
-		whiteCat.PublishWhite = false
-		whiteCat.PublishAdblock = false
-		whiteCat.PublishDnsmasq = false
-		whiteCat.PublishSmartDNS = false
-		whiteRes := &ProcessedResult{
-			DomRules:    e.res.WhiteDomRules,
-			IPRules:     make(map[string][]string),
-			ExactCounts: make(map[string]int),
-		}
+	if !e.cat.PublishWhite || len(e.res.WhiteDomRules) == 0 {
+		return
+	}
+	whiteCat := e.cat
+	whiteCat.Name = e.catName + "_white"
+	whiteCat.PublishWhite = false
+	whiteCat.PublishAdblock = false
+	whiteCat.PublishDnsmasq = false
+	whiteCat.PublishSmartDNS = false
+	whiteRes := &ProcessedResult{
+		DomRules:    e.res.WhiteDomRules,
+		IPRules:     make(map[string][]string),
+		ExactCounts: make(map[string]int),
+	}
 
-		ExportFiles(whiteCat, whiteRes, e.cfg, true)
+	ExportFiles(whiteCat, whiteRes, e.cfg, true)
 
-		for k, v := range whiteRes.ExactCounts {
-			e.res.ExactCounts[k+"_white"] = v
-		}
+	for k, v := range whiteRes.ExactCounts {
+		e.res.ExactCounts[k+"_white"] = v
 	}
 }
 
+// toMihomoWildcard 把内部正则还原为 mihomo `domain` 规则集通配符写法。
+//
+// ⚠️ 通配符语义差异（mihomo 文档）：
+//   - 本函数产出的是「规则集 domain 行为」使用的 Clash 通配符：`*` 仅匹配一级。
+//   - 路由规则 DOMAIN-WILDCARD 的 `*` 是"零或多个任意字符"（可跨级），两者不同。
+//
+// 为保证不产生语义收窄，对跨级 `.*` 前缀做如下映射：
+//
+//	^.*\.X$      -> .X   （任意层级子域，不含裸域；与 DOMAIN-WILDCARD `*.X` 一致）
+//	^(.+\.)?X$   -> +.X  （裸域 + 任意层级子域）
+//	^.+\.X$      -> .X   （任意层级子域，不含裸域）
+//	^[^.]+\.X$   -> *.X  （仅一级子域）
+//
+// 其余含 `.*` 的复杂位置仍退化为 `*`（近似），由调用方过滤 `()[]|?^$` 等复杂结果。
 func toMihomoWildcard(r string) string {
-	clean := r
-	clean = strings.TrimPrefix(clean, "^")
+	clean := strings.TrimPrefix(r, "^")
 	clean = strings.TrimSuffix(clean, "$")
 	if clean == "[^.]+" || clean == ".*" {
 		return "*"
 	}
-	if strings.HasPrefix(clean, "(.+\\.)?") {
-		clean = "+." + strings.TrimPrefix(clean, "(.+\\.)?")
-	} else if strings.HasPrefix(clean, ".+\\.") {
-		clean = "." + strings.TrimPrefix(clean, ".+\\.")
+	if strings.HasPrefix(clean, `(.+\.)?`) {
+		clean = "+." + strings.TrimPrefix(clean, `(.+\.)?`)
+	} else if strings.HasPrefix(clean, `.*\.`) {
+		clean = "." + strings.TrimPrefix(clean, `.*\.`)
+	} else if strings.HasPrefix(clean, `.+\.`) {
+		clean = "." + strings.TrimPrefix(clean, `.+\.`)
 	}
 	clean = strings.ReplaceAll(clean, ".*", "*")
 	clean = strings.ReplaceAll(clean, "[^.]+", "*")
-	clean = strings.ReplaceAll(clean, "\\.", ".")
-	clean = strings.ReplaceAll(clean, "\\s", " ")
+	clean = strings.ReplaceAll(clean, `\.`, ".")
+	clean = strings.ReplaceAll(clean, `\s`, " ")
 	return clean
 }
 
+// wildcardToRegex 把路由规则 DOMAIN-WILDCARD 的 `*`/`?` 转为正则。
+// 此处 `*` 语义为"零或多个任意字符"，故映射为 `.*`（与 normalizeWildcardDomain 的 `[^.]+` 不同）。
 func wildcardToRegex(w string) string {
 	r := strings.ReplaceAll(w, ".", `\.`)
 	r = strings.ReplaceAll(r, "*", `.*`)

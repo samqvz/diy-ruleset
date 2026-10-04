@@ -1,20 +1,55 @@
 package core
 
 import (
+	"bytes"
 	"fmt"
+	"maps"
 	"net/url"
 	"os"
 	"path"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
 
-func getFileSize(path string) string {
+type statEntry struct {
+	size int64
+	ok   bool
+}
+
+type statCache struct {
+	entries map[string]statEntry
+}
+
+func newStatCache() *statCache {
+	return &statCache{entries: make(map[string]statEntry)}
+}
+
+func (c *statCache) stat(path string) statEntry {
+	if e, ok := c.entries[path]; ok {
+		return e
+	}
 	info, err := os.Stat(path)
-	if err != nil {
+	e := statEntry{}
+	if err == nil {
+		e.size, e.ok = info.Size(), true
+	}
+	c.entries[path] = e
+	return e
+}
+
+// reportStatCache 是报表生成阶段共享的 stat 缓存，每次生成报表前重置。
+var reportStatCache = newStatCache()
+
+func resetReportStatCache() { reportStatCache = newStatCache() }
+
+func getFileSize(path string) string {
+	e := reportStatCache.stat(path)
+	if !e.ok {
 		return "-"
 	}
-	bytes := info.Size()
+	bytes := e.size
 	if bytes >= 1048576 {
 		return fmt.Sprintf("%.1fMB", float64(bytes)/1048576.0)
 	}
@@ -24,19 +59,34 @@ func getFileSize(path string) string {
 	return fmt.Sprintf("%dB", bytes)
 }
 
+// getLineCount 统计文件行数。
+// 使用 bytes.Count 直接按字节扫描，避免把整个文件重复转换为 string。
 func getLineCount(path string) int {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return 0
 	}
-	count := strings.Count(string(data), "\n")
-	if len(data) > 0 && !strings.HasSuffix(string(data), "\n") {
+	count := bytes.Count(data, []byte{'\n'})
+	if len(data) > 0 && data[len(data)-1] != '\n' {
 		count++
 	}
 	return count
 }
 
 func extractUpstreamName(rawURL string) string {
+	// pick 物化的"虚拟上游"（geopick:<来源URL>|<标签>）显示为 "作者/文件名-标签名"。
+	if strings.HasPrefix(rawURL, geopickPrefix) {
+		rest := strings.TrimPrefix(rawURL, geopickPrefix)
+		if idx := strings.LastIndex(rest, "|"); idx != -1 {
+			realURL := rest[:idx]
+			tag := rest[idx+1:]
+			if realURL == "auto" {
+				return "自动识别-" + tag
+			}
+			return extractUpstreamName(realURL) + "-" + tag
+		}
+		return rest
+	}
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return rawURL
@@ -57,6 +107,28 @@ func extractUpstreamName(rawURL string) string {
 		}
 	}
 	return host + "/" + fileName
+}
+
+// upstreamLink 返回用于链接的 URL：对 geopick 虚拟上游，链接到真实上游 URL（去掉前缀与标签）。
+func upstreamLink(rawURL string) string {
+	if strings.HasPrefix(rawURL, geopickPrefix) {
+		rest := strings.TrimPrefix(rawURL, geopickPrefix)
+		if idx := strings.LastIndex(rest, "|"); idx != -1 {
+			return rest[:idx]
+		}
+		return rest
+	}
+	return rawURL
+}
+
+// appendUpDetails 把某个规则集的上游明细（来源/数量）追加到列表，与「自动统计」表格格式一致。
+func appendUpDetails(details []string, stats map[string]int, upstreams []Upstream) []string {
+	for _, up := range upstreams {
+		if count, exists := stats[up.URL]; exists && count > 0 {
+			details = append(details, fmt.Sprintf("[%s](%s)(%d)", extractUpstreamName(up.URL), upstreamLink(up.URL), count))
+		}
+	}
+	return details
 }
 
 type LinkDef struct {
@@ -88,7 +160,7 @@ func buildLinksCell(proxy string, enableProxy bool, links ...LinkDef) (string, s
 
 func anyFileExists(paths ...string) bool {
 	for _, p := range paths {
-		if _, err := os.Stat(p); err == nil {
+		if reportStatCache.stat(p).ok {
 			return true
 		}
 	}
@@ -124,9 +196,98 @@ func renderTableSection(sb *strings.Builder, title string, enableProxy bool, row
 	sb.WriteString("\n")
 }
 
-func GenerateReport(results map[string]*ProcessedResult, cfg *Config) {
-	ghProxy := cfg.Global.GhProxy
-	enableProxy := cfg.Global.EnableGhProxy
+// renderGeoDataSection 在报表中追加 Geo / ASN 文件表格。
+// 复用 buildLinksCell 生成带文件大小的链接，与其它表格保持一致。
+func renderGeoDataSection(sb *strings.Builder, cfg *Config, ghProxy string, enableProxy bool) {
+	gd := cfg.Global.Geodata
+
+	type geoRow struct {
+		display   string
+		filename  string
+		path      string
+		upstreams []string
+	}
+	var rows []geoRow
+	if gd.GeoSite.Enable {
+		rows = append(rows, geoRow{"geosite", "geosite.dat", geoSiteOutputPath, gd.GeoSite.Upstreams})
+	}
+	if gd.GeoIP.Enable {
+		rows = append(rows, geoRow{"geoip", "geoip.dat", geoIPOutputPath, gd.GeoIP.Upstreams})
+	}
+	if gd.MMDB.Enable {
+		rows = append(rows, geoRow{"country", "country.mmdb", countryOutputPath, gd.MMDB.Upstreams})
+	}
+	if len(rows) == 0 {
+		return
+	}
+
+	sb.WriteString("### Geo / ASN 文件\n")
+	if enableProxy {
+		sb.WriteString("| 名&#8288;称 | 规&#8288;则&#8288;总&#8288;数 | 包&#8288;含&#8288;的&#8288;规&#8288;则 | 默&#8288;认&#8288;链&#8288;接 | 加&#8288;速&#8288;链&#8288;接 | 上&#8288;游&#8288;链&#8288;接 |\n")
+		sb.WriteString("| :--- | :--- | :--- | :--- | :--- | :--- |\n")
+	} else {
+		sb.WriteString("| 名&#8288;称 | 规&#8288;则&#8288;总&#8288;数 | 包&#8288;含&#8288;的&#8288;规&#8288;则 | 默&#8288;认&#8288;链&#8288;接 | 上&#8288;游&#8288;链&#8288;接 |\n")
+		sb.WriteString("| :--- | :--- | :--- | :--- | :--- |\n")
+	}
+
+	repo := os.Getenv("GITHUB_REPOSITORY")
+	for _, r := range rows {
+		countStr, tagsStr := statGeoFile(r.display, r.path)
+
+		url := fmt.Sprintf("https://github.com/%s/raw/%s", repo, r.path)
+		cellDirect, cellProxy := buildLinksCell(ghProxy, enableProxy,
+			LinkDef{r.filename, url, getFileSize(r.path), true, "&nbsp;"},
+		)
+
+		upStr := "-"
+		if len(r.upstreams) > 0 {
+			var ups []string
+			for _, u := range r.upstreams {
+				ups = append(ups, fmt.Sprintf("[%s](%s)", extractUpstreamName(u), u))
+			}
+			upStr = strings.Join(ups, "<br>")
+		}
+
+		if enableProxy {
+			sb.WriteString(fmt.Sprintf("| **%s** | %s | %s | %s | %s | %s |\n", r.display, countStr, tagsStr, cellDirect, cellProxy, upStr))
+		} else {
+			sb.WriteString(fmt.Sprintf("| **%s** | %s | %s | %s | %s |\n", r.display, countStr, tagsStr, cellDirect, upStr))
+		}
+	}
+	sb.WriteString("\n")
+}
+
+// statGeoFile 统计已生成的 geo/mmdb 文件的规则总数与包含的标签（读不出来时返回 "-"）。
+func statGeoFile(kind, path string) (countStr, tagsStr string) {
+	var m map[string][]Rule
+	var err error
+	switch kind {
+	case "geosite":
+		m, err = LoadGeoSite(path)
+	case "geoip":
+		m, err = LoadGeoIP(path)
+	case "country":
+		m, err = LoadMMDB(path)
+	}
+	if err != nil {
+		return "-", "-"
+	}
+	tags := slices.Sorted(maps.Keys(m))
+	count := 0
+	for _, t := range tags {
+		count += len(m[t])
+	}
+	tagsStr = strings.Join(tags, ", ")
+	if tagsStr == "" {
+		tagsStr = "-"
+	}
+	return strconv.Itoa(count), tagsStr
+}
+
+func GenerateReport(results map[string]*ProcessedResult, cfg *Config, asnRuleCount int) {
+	resetReportStatCache()
+	ghProxy := cfg.Global.EnableGhProxy.URL
+	enableProxy := cfg.Global.EnableGhProxy.Enable
 	const startTag = `<!-- REPORT_START -->`
 	const endTag = `<!-- REPORT_END -->`
 	var sb strings.Builder
@@ -140,6 +301,8 @@ func GenerateReport(results map[string]*ProcessedResult, cfg *Config) {
 			}
 		}
 	}
+	// ASN 网段规则（IP-ASN 识别）未物化为 category，单独计入总数。
+	total += asnRuleCount
 
 	sb.WriteString(startTag + "\n")
 	sb.WriteString(fmt.Sprintf("**最后更新时间** : %s ( UTC+8 )\n", time.Now().In(time.FixedZone("CST", 8*3600)).Format("2006-01-02 15:04:05")))
@@ -164,22 +327,11 @@ func GenerateReport(results map[string]*ProcessedResult, cfg *Config) {
 		}
 
 		displayName := strings.ReplaceAll(cat.Name, "-", "&#8209;")
-		var upDetails []string
-		for _, up := range cat.Upstreams {
-			if count, exists := r.UpstreamStats[up.URL]; exists && count > 0 {
-				extractedName := extractUpstreamName(up.URL)
-				upDetails = append(upDetails, fmt.Sprintf("[%s](%s)(%d)", extractedName, up.URL, count))
-			}
-		}
+		upDetails := appendUpDetails(nil, r.UpstreamStats, cat.Upstreams)
 		for _, mergeCatName := range cat.MergeFrom {
 			for _, c := range cfg.Categories {
 				if c.Name == mergeCatName {
-					for _, up := range c.Upstreams {
-						if count, exists := r.UpstreamStats[up.URL]; exists && count > 0 {
-							extractedName := extractUpstreamName(up.URL)
-							upDetails = append(upDetails, fmt.Sprintf("[%s](%s)(%d)", extractedName, up.URL, count))
-						}
-					}
+					upDetails = appendUpDetails(upDetails, r.UpstreamStats, c.Upstreams)
 				}
 			}
 		}
@@ -195,13 +347,7 @@ func GenerateReport(results map[string]*ProcessedResult, cfg *Config) {
 			displayNameWhite := strings.ReplaceAll(whiteName, "-", "&#8209;")
 
 			if r.WhiteCount > 0 {
-				var whiteUpDetails []string
-				for _, up := range cat.Upstreams {
-					if wCount, exists := r.WhiteUpstreamStats[up.URL]; exists && wCount > 0 {
-						extractedName := extractUpstreamName(up.URL)
-						whiteUpDetails = append(whiteUpDetails, fmt.Sprintf("[%s](%s)(%d)", extractedName, up.URL, wCount))
-					}
-				}
+				whiteUpDetails := appendUpDetails(nil, r.WhiteUpstreamStats, cat.Upstreams)
 				whiteUpStr := strings.Join(whiteUpDetails, "<br>")
 				if whiteUpStr == "" {
 					whiteUpStr = "-"
@@ -581,8 +727,10 @@ func GenerateReport(results map[string]*ProcessedResult, cfg *Config) {
 		renderTableSection(&sb, "CNIP", enableProxy, cnipRows)
 	}
 
+	renderGeoDataSection(&sb, cfg, ghProxy, enableProxy)
+
 	sb.WriteString("\n" + endTag + "\n")
-	reportTitle := "# 📦 DIY-Ruleset 自动编译报告\n\n**该页面由 GitHub Actions 每日自动生成**\n\n"
+	reportTitle := "## 📦 DIY-Ruleset 自动编译报告\n\n**该页面由 GitHub Actions 每日自动生成**\n\n"
 
 	os.MkdirAll("publish", 0755)
 	_ = os.WriteFile("publish/README.md", []byte(reportTitle+sb.String()), 0644)

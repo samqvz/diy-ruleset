@@ -1,22 +1,62 @@
-# ============================
-# DIY-Ruleset 配置示例 
-# ============================
+# ============================================================
+# DIY-Ruleset 配置示例
+# 复制为 config.yaml 后按需修改；缺失 config.yaml 时引擎会自动生成一份。
+# ============================================================
+
+# ------------------------------------------------------------
+# 全局默认输出开关（可被单个 category 覆盖）
+# ------------------------------------------------------------
 global:
-  enable_gh_proxy: true                # 是否在 README 报表中为下载链接添加 GitHub 加速链接
-  gh_proxy: "https://v6.gh-proxy.org/" # GitHub 加速前缀
-  split_cnip: true                     # 是否生成 CNIPv4/CNIPv6 文件
-  # 全局默认的输出开关与特性。所有 Category 都会默认继承这里的设置。
+  split_cnip: true                       # 默认 false。true=把 cn 规则集的 IP 拆成 CNIPv4 / CNIPv6 独立文件
+  enable_gh_proxy:
+    enable: true                         # 默认 false。true=在 README 报表中额外给出 GitHub 加速下载链接
+    gh_proxy: "https://v6.gh-proxy.org/" # 默认空。GitHub 加速前缀
+
+
+  # Geo / ASN 数据文件（可选，详见 README「Geo 与 ASN 规则」章节）
+  # geosite / geoip / mmdb 各自独立，统一对象形式；输出路径固定为
+  # publish/geosite.dat、publish/geoip.dat、publish/country.mmdb。
+  geodata:
+    geosite:
+      enable: true    # 默认 false。true=生成 publish/geosite.dat（默认所有 category 的域名规则）
+    geoip:
+      enable: true    # 默认 false。true=生成 publish/geoip.dat（默认所有 category 的 IP 规则）
+    mmdb:
+      enable: true    # 默认 false。true=生成 publish/country.mmdb
+      only_asn: true  # 默认 false。true=mmdb 仅写 ASN 规则；false=与 geoip.dat 一致（国家/ASN/category）
+    # 需要拉取上游时，在对应类型下加 upstreams（URL 列表，类型由外层决定）与 pick：
+    # geosite:
+    #   enable: true
+    #   upstreams:
+    #     - "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"
+    #   pick: [cn]                   # 默认空=全部标签，不建议为空，没必要拉取上千个规则集，README.md报表顶不住
+    #   exclude: [ads, gfw]          # 默认空。从 pick 结果剔除（黑名单，大小写不敏感）
+    # geoip:
+    #   enable: true
+    #   upstreams: ["https://raw.githubusercontent.com/Loyalsoldier/geoip/release/geoip.dat"]
+    #   pick: [cn]                   # 默认空=全部标签，不建议为空
+    #   exclude: []                  # 默认空。从 pick 结果剔除（黑名单，大小写不敏感）
+    # mmdb:
+    #   enable: true
+    #   only_asn: true               # 可选：true=仅写 ASN 规则
+    #   upstreams: ["https://raw.githubusercontent.com/Loyalsoldier/geoip/release/Country.mmdb"]
+    #   pick: [AS13335]              # 上游没有的 AS 号会自动拉取网段
+    #   exclude: []                  # 默认空。从 pick 结果剔除（黑名单，大小写不敏感）
+
+  # Sing-box 输出（以下布尔开关默认均为 false）
   singbox:
-    enable: true             # 是否生成 Sing-box 文件，总开关
-    json: true               # 是否生成 JSON 格式文件
-    srs: true                # 是否生成 SRS  格式文件
-    single_file: false       # true将域名和IP合并为一个文件; false拆分为 主文件名.srs 和 主文件名ip.srs
+    enable: true             # 总开关
+    json: true               # 生成 JSON
+    srs: true                # 生成 SRS
+    single_file: false       # true=域名+IP 合并；false=拆分为 <名>.srs / <名>_ip.srs
+  # Mihomo (Clash Meta) 输出（以下布尔开关默认均为 false）
   mihomo:
-    enable: true             # 是否生成 Mihomo (Clash Meta) 文件，总开关
-    txt: true                # 是否生成 Classical List 格式文件
-    yaml: true               # 是否生成 YAML 格式文件
-    mrs: true                # 是否生成 MRS  格式文件
-    single_file: false       # true合并域名和IP; false拆分为 主文件名.mrs 和 主文件名ip.mrs，注：mrs 文件不支持合并，开启也会拆分！
+    enable: true             # 总开关
+    txt: true                # 生成 List
+    yaml: true               # 生成 YAML
+    mrs: true                # 生成 MRS
+    single_file: false       # 注意：MRS 二进制格式强制域名/IP 分离，此开关对 MRS 无效
+  # 以下 Apple 系 / V2Ray 输出：enable=false 不生成；single_file=true 域名+IP 合并，false 拆分
   v2ray:        {enable: true, single_file: false}
   surge:        {enable: true, single_file: true}
   loon:         {enable: true, single_file: true}
@@ -25,50 +65,63 @@ global:
   shadowrocket: {enable: true, single_file: true}
   quantumultx:  {enable: true, single_file: true}
 
-# ============================
-# 规则集配置 (Categories)
-# ============================
+# ------------------------------------------------------------
+# 规则集分组
+# ------------------------------------------------------------
 categories:
-  # 示例 1：常规规则集 (继承全局，无特殊定制)
-  - name: "cn"                 # 最终生成的文件名 (如 cn.srs, cn.mrs)
-    merge_from:
-      - "applecn"              # 继承并合并名为 "applecn" 的子规则集
-    # DNS 智能分流
-    publish_dnsmasq: true      # 输出 dnsmasq 格式 (server=/domain/223.6.6.6)
-    dnsmasq_server: "223.6.6.6" 
-    publish_smartdns: true     # 输出 smartdns 格式
-    smartdns_server: "china_group"
-    
-    # 上游订阅列表，引擎会智能选择 parser 解析器，亦可指定选择
-    # parser 可用值： clash/v2ray/adblock/hosts/smartdns/dnsmasq/egern/stash/quantumultx/shadowrocket/loon/surge/white
+  # ---------- 示例 1：常规规则集（继承全局设置） ----------
+  - name: "cn"                 # 最终文件名，如 cn.srs / cn.mrs / cn.list（必填）
+    # geosite: true            # 可选：覆盖全局设置，该规则集的域名规则加入 geosite.dat
+    # geoip: true              # 可选：覆盖全局设置，该规则集的 IP 规则加入 geoip.dat
+    # mmdb: true               # 可选：覆盖全局设置，该规则集的 IP 规则加入 country.mmdb
+    merge_from:                # 默认空。合并指定规则集（其上游与本地规则一并纳入）
+      - "applecn"
+    # DNS 智能分流（既可拦截，也可分流）
+    publish_dnsmasq: true           # 默认 false。输出 dnsmasq：server=/domain/223.6.6.6
+    dnsmasq_server: "223.6.6.6"     # 默认空。dnsmasq 上游服务器地址
+    publish_smartdns: true          # 默认 false。输出 smartdns：nameserver /domain/china_group
+    smartdns_server: "china_group"  # 默认空。smartdns 上游服务器地址
+
+    # 上游订阅；parser 留空（默认）则由引擎自动嗅探，建议显式指定以避免歧义
+    # 可用 parser：clash / v2ray / adblock / hosts / dnsmasq / smartdns /
+    #              egern / surge / shadowrocket / loon / stash / quantumultx / white
     upstreams:
       - {url: "https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/direct.txt", parser: "clash"}
       - {url: "https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/cncidr.txt"}
       - {url: "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/ChinaMax/ChinaMax.list"}
 
-  # 示例 2：去广告拦截规则集 (演示白名单行为与远程剔除)
+  # ---------- 示例 2：去广告拦截（演示白名单与远程剔除） ----------
   - name: "reject"
-    # 白名单控制
-    auto_extract_white: true   # 自动从上游 (如 adblock 格式) 提取 @@ 白名单
-    publish_white: true        # 将提取的白名单单独输出一份文件
-    white_behavior: "remove"   # 可用值："remove" = 从主规则剔除并提取; 可用值："extract_only" = 仅提取，不进行剔除
-    # DNS 拦截模式
-    publish_adblock: true      # 输出 Adblock 兼容格式
-    publish_smartdns: true     # 默认输出拦截语法 address=/domain/#
-    publish_dnsmasq: true      # 默认输出拦截语法 address=/domain/0.0.0.0
-    
-    # 远程剔除列表 (引擎在去重时会自动剔除此列表中的规则)
+    auto_extract_white: true   # 默认 false。true=自动提取上游 @@ 白名单
+    publish_white: true        # 默认 false。true=白名单单独输出为 reject_white.*
+    white_behavior: "remove"   # 默认 remove。remove=提取并剔除；extract_only=仅提取
+    publish_adblock: true      # 默认 false。true=输出 Adblock 语法
+    publish_dnsmasq: true      # 默认 false。true=输出 address=/domain/0.0.0.0
+    publish_smartdns: true     # 默认 false。true=输出 address /domain/#
+
+    # 远程剔除列表（默认空）：命中即从最终结果中剔除
     remove_urls:
       - {url: "https://raw.githubusercontent.com/217heidai/adblockfilters/refs/heads/main/rules/white.txt"}
-    # 上游订阅列表
     upstreams:
       - {url: "https://anti-ad.net/clash.yaml"}
       - {url: "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/pro.txt", parser: "adblock"}
 
-  # 示例 3：纯本地规则 (不拉取任何上游)，name 必须和add/文件名一致
+  # ---------- 示例 3：纯本地规则（不拉取上游） ----------
+  # name 必须与 add/<name>.list 文件名一致
   - name: "local"
-    upstreams: []             # 留空或删除这一行。引擎会自动读取 add/local.list 的本地文件
+    upstreams: []
 
-  - name: applecn
+  # ---------- 示例 4：被其它规则集 merge_from 引用的子规则集 ----------
+  - name: "applecn"
     upstreams:
       - {url: "https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/apple.txt"}
+
+# ------------------------------------------------------------
+# 规则类型支持矩阵（详见 README.md）
+# ------------------------------------------------------------
+# - 域名：DOMAIN / DOMAIN-SUFFIX / DOMAIN-KEYWORD / DOMAIN-REGEX / DOMAIN-WILDCARD
+# - IP ：IP-CIDR / IP-CIDR6 / IP-ASN
+# - 其它：DST-PORT / USER-AGENT / URL-REGEX / PROCESS-NAME / PROCESS-PATH
+#
+# 注意：不同客户端对类型支持不同（如 .mrs 不支持 KEYWORD/REGEX/WILDCARD），
+# 引擎会在去重阶段对这三类做"同类型"限制以避免规则丢失。
