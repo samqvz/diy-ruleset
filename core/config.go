@@ -47,7 +47,6 @@ type GeoOutput struct {
 	Upstreams []string `yaml:"upstreams"`
 	Pick      []string `yaml:"pick"`
 	Exclude   []string `yaml:"exclude"`
-	OnlyASN   bool     `yaml:"only_asn"`
 }
 
 type SingboxOutput struct {
@@ -262,6 +261,24 @@ func (cfg *Config) Validate() error {
 		for j, up := range cat.Upstreams {
 			if strings.TrimSpace(up.URL) == "" {
 				return fmt.Errorf("❌ [%s] 索引为 %d 的上游缺失 url", name, j+1)
+			}
+			// Geo 标签引用（geosite:/geoip:/asn:）与内部物化标记（geopick:）必须在校验期判定，
+			// 否则错误只能推迟到运行期，表现为"上游文件下载失败"或整条上游静默失效。
+			if kind, _, isGeoRef, ok := validateGeoRefUpstream(up.URL); isGeoRef {
+				if strings.HasPrefix(strings.TrimSpace(up.URL), geopickPrefix) {
+					return fmt.Errorf("❌ [%s] 索引为 %d 的上游 url [%s] 使用了内部物化标记 geopick:，"+
+						"它不是公开配置语法；如需引用 Geo 标签请写 geosite:<标签> / geoip:<标签> / asn:<AS号>",
+						name, j+1, up.URL)
+				}
+				if !ok {
+					return fmt.Errorf("❌ [%s] 索引为 %d 的上游 url [%s] 的 %s 引用缺少标签；"+
+						"正确写法形如 %s:<标签>（如 %s:cn、asn:AS13335）", name, j+1, up.URL, kind, kind, kind)
+				}
+				if strings.TrimSpace(up.Parser) != "" {
+					return fmt.Errorf("❌ [%s] 索引为 %d 的上游 url [%s] 是 %s 标签引用，不能同时指定 parser: %s；"+
+						"引用形态的规则由引擎按 Clash 语法写出，parser 在此无意义，请删除该字段",
+						name, j+1, up.URL, kind, up.Parser)
+				}
 			}
 			if up.Parser != "" && !knownParsers[up.Parser] {
 				return fmt.Errorf("❌ [%s] 索引为 %d 的上游 parser 无效: %s", name, j+1, up.Parser)

@@ -23,8 +23,7 @@ global:
 #      pick: [AS15169]             # 同上
 #      exclude: []
     mmdb:
-      enable: true
-      only_asn: true      # false（默认）=与 geoip.dat 一致（国家/ASN/category）；true=仅写 ASN
+      enable: true        # 固定同时产出 publish/country.mmdb（tags：国家码/ASN/category）与 publish/asn.mmdb（仅 ASN，GeoLite2-ASN 兼容）
 #      upstreams: ["https://raw.githubusercontent.com/Loyalsoldier/geoip/release/Country.mmdb"]
 #      pick: [AS13335]                # 同上
 #      exclude: []
@@ -133,6 +132,10 @@ categories:
     upstreams:
       - {url: "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/refs/heads/master/rule/Clash/Discord/Discord.list"}
       - {url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/refs/heads/meta/geo/geosite/discord.list"}
+
+  - name: crypto
+    upstreams:
+      - {url: "https://raw.githubusercontent.com/QuixoticHeart/rule-set/refs/heads/ruleset/meta/crypto.list"}
 
   - name: httpdns
     upstreams:

@@ -83,7 +83,8 @@ func TestASNRoundTrip(t *testing.T) {
 			{Type: "IP-CIDR", Value: "8.8.4.0/24"},
 		},
 	}
-	if err := WriteMMDB(path, entries, true); err != nil {
+	// 仅 ASN 语义（GeoLite2-ASN 兼容）的写入口径（t3 后为独立入口）。
+	if err := WriteASNMMDB(path, entries); err != nil {
 		t.Fatal(err)
 	}
 	got, err := LoadMMDB(path)

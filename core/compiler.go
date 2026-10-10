@@ -126,8 +126,9 @@ func execName(name string) string {
 	return name
 }
 
-// GetExecPath 优先返回工作目录下的内核，其次返回 PATH 中的可执行文件路径。
-func GetExecPath(name string) string {
+// lookupExecutable 解析内核可执行文件的真实路径：优先工作目录下的同名文件，
+// 其次 PATH。找不到时返回空串。
+func lookupExecutable(name string) string {
 	exeName := execName(name)
 	if _, err := os.Stat(exeName); err == nil {
 		if absPath, err := filepath.Abs(exeName); err == nil {
@@ -138,14 +139,19 @@ func GetExecPath(name string) string {
 	if path, err := exec.LookPath(exeName); err == nil {
 		return path
 	}
+	return ""
+}
+
+// GetExecPath 优先返回工作目录下的内核，其次返回 PATH 中的可执行文件路径。
+// 都找不到时返回裸名字，交由 exec.Command 给出标准错误（保持既有行为）。
+func GetExecPath(name string) string {
+	if path := lookupExecutable(name); path != "" {
+		return path
+	}
 	return name
 }
 
 // commandAvailable 判断内核是否可在当前环境调用。
 func commandAvailable(name string) bool {
-	if _, err := os.Stat(execName(name)); err == nil {
-		return true
-	}
-	_, err := exec.LookPath(execName(name))
-	return err == nil
+	return lookupExecutable(name) != ""
 }

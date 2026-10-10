@@ -18,11 +18,53 @@ const (
 	geoSiteOutputPath = "publish/geosite.dat"
 	geoIPOutputPath   = "publish/geoip.dat"
 	countryOutputPath = "publish/country.mmdb"
+	// asnOutputPath 与 countryOutputPath 同源（同一份 store.asn + category mmdb 标签 + IP-ASN 识别），
+	// 只是记录形态不同：country.mmdb 写 tags 数组，asn.mmdb 写 autonomous_system_number（GeoLite2-ASN 兼容）。
+	asnOutputPath = "publish/asn.mmdb"
 
 	// geopickPrefix 标记由 pick 标签物化出的"虚拟上游"（格式 geopick:<来源URL>|<标签>）：
 	// FetchAll 据此跳过下载（规则已写入 temp/raw）；报表据此还原真实来源与标签名。
+	//
+	// 这是「虚拟上游」的**唯一**判定：categories.upstreams 里的 geosite:/geoip:/asn:
+	// 标签引用也会被 materializeGeoRefUpstreams 改写成同一形态，因此下载阶段无需
+	// 再认识第二种前缀。
 	geopickPrefix = "geopick:"
 )
+
+// geoKindNames 是 GeoDataStore 三张表与 kind 名的对应关系（顺序固定，用于稳定遍历与文案）。
+// **这是 kind 清单的唯一来源**：geoRefPrefixes（引用语法前缀）由它派生，避免两处各自维护
+// 一份 "geosite"/"geoip"/"asn" 字面量而悄悄漂移。
+var geoKindNames = [...]string{"geosite", "geoip", "asn"}
+
+// geoStoreKey 生成 GeoDataStore.source 的键（"<kind>:<tag>"）。
+// store.source 的写入方（BuildGeoData）与读取方（materializePickCategories /
+// materializeGeoRefUpstreams）必须用同一套拼接规则：任一处改名会让查表静默落空、
+// 回退成 "auto"，表现为**报表来源错标且不报错**。
+func geoStoreKey(kind, tag string) string { return kind + ":" + tag }
+
+// geoTable 按 kind 取对应的标签表；未知 kind 返回 nil（读取方对 nil map 安全）。
+func (s *GeoDataStore) geoTable(kind string) map[string][]Rule {
+	switch kind {
+	case "geosite":
+		return s.geosite
+	case "geoip":
+		return s.geoip
+	case "asn":
+		return s.asn
+	default:
+		return nil
+	}
+}
+
+// geoRules 按 kind 取标签规则；未配置该类型的上游（enable=false）时返回 nil。
+func (s *GeoDataStore) geoRules(kind, tag string) []Rule {
+	return s.geoTable(kind)[tag]
+}
+
+// geoTagKnown 判断某标签是否在本次构建的 store 中存在（即使规则为空也算"已知"）。
+func (s *GeoDataStore) geoTagKnown(kind, tag string) bool {
+	return hasMapKey(s.geoTable(kind), tag)
+}
 
 // GeoDataStore 缓存一次构建过程中的 geo/mmdb 上游数据（pick 选中的标签）。
 // geosite / geoip / mmdb 三张表统一用 "标签 -> []Rule" 表达：
@@ -46,15 +88,17 @@ func BuildGeoData(cfg *Config) *GeoDataStore {
 	geoip, geoIPSrc := buildGeoOfType(gd.GeoIP, "geoip")
 	asn, asnSrc := buildGeoOfType(gd.MMDB, "asn")
 
+	// source 的键统一由 geoStoreKey 生成：读取方（materialize*）必须用同一函数，
+	// 否则查表静默落空 → 来源回退 "auto" → 报表错标且不报错。
 	source := make(map[string]string, len(geoSrc)+len(geoIPSrc)+len(asnSrc))
 	for k, v := range geoSrc {
-		source["geosite:"+k] = v
+		source[geoStoreKey("geosite", k)] = v
 	}
 	for k, v := range geoIPSrc {
-		source["geoip:"+k] = v
+		source[geoStoreKey("geoip", k)] = v
 	}
 	for k, v := range asnSrc {
-		source["asn:"+k] = v
+		source[geoStoreKey("asn", k)] = v
 	}
 
 	return &GeoDataStore{
@@ -70,7 +114,7 @@ func BuildGeoData(cfg *Config) *GeoDataStore {
 //   - 存在同名 category → 作为其额外上游合并（与普通上游一起参与去重）
 //   - 不存在同名 category → 新建一个同名 category（用于生成 mrs/srs/list 等文件）
 //
-// 这样 pick 的标签既进入 geosite.dat / geoip.dat / country.mmdb，也生成对应的 mrs/srs/list 文件。
+// 这样 pick 的标签既进入 geosite.dat / geoip.dat / country.mmdb（与 asn.mmdb），也生成对应的 mrs/srs/list 文件。
 func materializePickCategories(cfg *Config, store *GeoDataStore) {
 	writePick := func(kind, tag string, rules []Rule) {
 		// ASN 标签（如 AS13335）不是独立规则集，不物化为 category，避免污染统计报表。
@@ -80,10 +124,15 @@ func materializePickCategories(cfg *Config, store *GeoDataStore) {
 		if len(rules) == 0 {
 			return
 		}
-		src := store.source[kind+":"+tag]
+		src := store.source[geoStoreKey(kind, tag)]
 		if src == "" {
 			src = "auto"
 		}
+		// 注意：这里必须使用**原始标签**（不做归一化）。
+		// 该 URL 只用于报表展示与来源追溯，category 名与 store.source 的键都用原始标签；
+		// 若在此归一化（如 geosite 标签 "as123" 变成 "AS123"），会出现"URL 标签 ≠ category 名"的展示层不一致。
+		// normalizeGeoRefTag 只服务于新增的 geosite:/geoip:/asn: 引用解析路径（parseGeoRef），
+		// 且它是 kind 感知的：geosite/geoip 只小写，绝不做 ASN 归一。
 		url := geopickPrefix + src + "|" + tag
 
 		for i := range cfg.Categories {
@@ -117,6 +166,55 @@ func materializePickCategories(cfg *Config, store *GeoDataStore) {
 	}
 }
 
+// materializeGeoRefUpstreams 让 categories.upstreams 可以直接引用 geo/mmdb 标签：
+func materializeGeoRefUpstreams(cfg *Config, store *GeoDataStore) {
+	prefix := geopickPrefix
+	for i := range cfg.Categories {
+		cat := &cfg.Categories[i]
+		for j := range cat.Upstreams {
+			up := &cat.Upstreams[j]
+			raw := strings.TrimSpace(up.URL)
+			// 幂等守卫：已物化为 geopick: 形态的上游不再处理（未物化的 geo 引用必须继续往下走）。
+			// 只跳过、不登记：规则文件由物化它的那一方写出。
+			if raw == "" || strings.HasPrefix(raw, prefix) {
+				continue
+			}
+			kind, tag, ok := parseGeoRef(raw)
+			if !ok {
+				continue
+			}
+
+			rules := store.geoRules(kind, tag)
+			if len(rules) == 0 {
+				if store.geoTagKnown(kind, tag) {
+					// 标签存在但规则为空：数据异常（上游数据里该标签为空）。
+					fmt.Printf("⚠️ [%s] 上游引用 %s 命中标签但规则为空（异常数据）：可能 "+
+						"global.geodata.%s 的上游数据中该标签为空；已跳过该上游，其余上游不受影响。\n",
+						cat.Name, raw, kind)
+				} else {
+					fmt.Printf("⚠️ [%s] 上游引用 %s 未命中本次构建的 Geo 数据：可能 "+
+						"global.geodata.%s.enable=false，或上游未 pick 到该标签；已跳过该上游，其余上游不受影响。\n",
+						cat.Name, raw, kind)
+				}
+				// 统一改写为"无规则"的虚拟上游形态：不写文件，但必须避免它被下载阶段
+				// 当作真实 URL 请求（那样会把"标签不存在/为空"误报成"下载失败"）。
+				up.URL = prefix + "auto|" + tag
+				continue
+			}
+
+			src := store.source[geoStoreKey(kind, tag)]
+			if src == "" {
+				src = "auto"
+			}
+			// 下标 j+1 与 ProcessCategory 的 i+1 定位一致：引用与普通上游共用同一套槽位约定。
+			// 同一标签被重复引用时，每个槽位各写一份内容相同的文件（保持槽位 1:1 关系），
+			// 最终规则由 ProcessCategory 跨上游合并去重 —— 与"用户真的写了两条相同上游"同构。
+			writeRulesFile(fmt.Sprintf("temp/raw/%s_%d.txt", cat.Name, j+1), rules)
+			up.URL = prefix + src + "|" + tag
+		}
+	}
+}
+
 // writeRulesFile 把规则写为 Clash 文本行文件（供 ProcessCategory 解析）。
 func writeRulesFile(path string, rules []Rule) {
 	if err := os.WriteFile(path, []byte(strings.Join(rulesToLines(rules), "\n")), 0o644); err != nil {
@@ -131,6 +229,125 @@ func rulesToLines(rules []Rule) []string {
 		lines = append(lines, r.Type+","+r.Value)
 	}
 	return lines
+}
+
+// geoRefPrefixes 是 categories.upstreams 中「Geo 标签引用」的允许前缀。
+// 由 geoKindNames 派生（kind + ":"），因此新增 kind 只需改 geoKindNames 一处；
+// 归属判定只依赖这一张表，避免多处字符串比较漂移。
+var geoRefPrefixes = func() []string {
+	prefixes := make([]string, 0, len(geoKindNames))
+	for _, kind := range geoKindNames {
+		prefixes = append(prefixes, kind+":")
+	}
+	return prefixes
+}()
+
+// geoRefPrefixKind 判断一个「未归一化」的引用文本是否使用了 geo 前缀，并返回其 kind。
+// 与 parseGeoRef 的区别：**不要求标签非空**，因此可用于区分
+// "geosite:cn"（合法引用）与 "geosite:"（引用了合法前缀但标签为空，属配置错误）。
+// 前缀识别同样只依赖 geoRefPrefixes，不在别处重复字符串比较。
+func geoRefPrefixKind(rawURL string) (kind string, ok bool) {
+	lower := strings.ToLower(strings.TrimSpace(rawURL))
+	for _, prefix := range geoRefPrefixes {
+		if strings.HasPrefix(lower, prefix) {
+			return strings.TrimSuffix(prefix, ":"), true
+		}
+	}
+	return "", false
+}
+
+// validateGeoRefUpstream 校验用户配置里的一个上游 url 是否为**合法**的 geo 标签引用。
+// 返回 (kind, tag, true) 表示是引用且形态合法；ok=false 表示"该 url 不被视为合法引用"。
+// 调用方据此 fail fast，把错误从运行期（下载失败/静默失效）提前到配置校验期。
+//
+// 被判定为非法（isGeoRef=true 但 ok=false）的情形：
+//   - 前缀命中 geoRefPrefixes 但标签为空（"geosite:" / "geoip:   "）——
+//     这类 url 既不是可下载的真实地址，也不是有效引用，运行期只能表现为"下载失败"，会误导排查；
+//   - geopickPrefix（内部物化标记）——它不是公开配置语法，用户手写会让整条上游静默失效。
+func validateGeoRefUpstream(rawURL string) (kind, tag string, isGeoRef bool, ok bool) {
+	trimmed := strings.TrimSpace(rawURL)
+	if strings.HasPrefix(trimmed, geopickPrefix) {
+		return "", "", true, false
+	}
+	kind, ok2 := geoRefPrefixKind(trimmed)
+	if !ok2 {
+		return "", "", false, false
+	}
+	refKind, refTag, valid := parseGeoRef(trimmed)
+	return kind, refTag, true, valid && refKind == kind
+}
+
+// isVirtualUpstream 判断一个上游 url 是否属于「虚拟上游」——即**不应被当作真实 URL 下载**的上游。
+// 判定只有这一处，供 FetchAll 的下载跳过判定使用（并作为 TestGeoRef* 的分类口径）。
+//
+// 谓词为真有两种情形：
+//  1. 已物化的 geopick:<来源URL>|<标签> 形态（materializePickCategories / materializeGeoRefUpstreams 产出）；
+//  2. 由 parseGeoRef 可识别的 geo 标签引用（geosite:|geoip:|asn:），即使它尚未物化。
+//
+// 情形 2 是必要的防御纵深：未命中标签的引用会被 materializeGeoRefUpstreams 改写成
+// "geopick:auto|<标签>"，但若有人把未经物化的 cfg 直接交给 FetchAll，下载阶段也不会
+// 拿 "geosite:xxx" 去发请求——否则会把"引用了不存在的标签"误报成"下载失败"。
+//
+// 注意：形如 "geosite:"（空标签）不是有效引用，仍按普通 URL 处理
+// （这类配置已由 validateGeoRefUpstream 在校验期拒绝）。
+func isVirtualUpstream(url string) bool {
+	if strings.HasPrefix(strings.TrimSpace(url), geopickPrefix) {
+		return true
+	}
+	_, _, ok := parseGeoRef(url)
+	return ok
+}
+
+// parseGeoRef 解析 "geosite:cn" / "geoip:cn" / "asn:AS13335" 形态的标签引用。
+// 前缀大小写不敏感；kind 取 geoKindNames 中的规范名（与 GeoDataStore 的字段对应），
+// tag 按 normalizeGeoRefTag 归一化（geosite/geoip 只小写、asn 规范为 AS<n>）。
+//
+// 不满足形态（含空标签）时 ok=false，调用方应把该上游当作普通 URL 处理。
+// 注意 "geopick:" 由 geopickPrefix 单独判定，不在此处识别，因此已物化的虚拟上游不会被二次改写。
+func parseGeoRef(rawURL string) (kind, tag string, ok bool) {
+	ref := strings.TrimSpace(rawURL)
+	lower := strings.ToLower(ref)
+	for _, prefix := range geoRefPrefixes {
+		if !strings.HasPrefix(lower, prefix) {
+			continue
+		}
+		kind = strings.TrimSuffix(prefix, ":")
+		tag = normalizeGeoRefTag(kind, strings.TrimSpace(ref[len(prefix):]))
+		if tag == "" {
+			return "", "", false
+		}
+		return kind, tag, true
+	}
+	return "", "", false
+}
+
+// normalizeGeoRefTag 归一化**引用语法**里的标签，结果必须与 store 的键一致：
+//   - asn 引用统一为 "AS<n>"（与 geoip/mmdb 的 pick 一致）；
+//   - geosite/geoip 引用只做小写，**绝不做 ASN 归一**。
+//
+// 后者是关键：store 的键来自上游标签（geosite/geoip 统一小写），若把纯数字标签
+// （如 geosite 里真实存在的 "123"）归一成 "AS123"，查表必然失配，已存在的标签会被
+// 误判为"未命中"，导致告警、不写槽位文件、该上游规则**静默丢失**。
+func normalizeGeoRefTag(kind, tag string) string {
+	tag = strings.TrimSpace(tag)
+	if tag == "" {
+		return ""
+	}
+	if kind == "asn" {
+		// 与 buildGeoOfType 对 kind==asn 的归一保持一致：能解析为 AS 号的写成 "AS<n>"，
+		// 其余标签小写（不能用 ToUpper——那会与 store 的小写键失配，重演本轮修掉的 bug）。
+		if n, ok := parseASNTag(tag); ok {
+			return fmt.Sprintf("AS%d", n)
+		}
+		return strings.ToLower(tag)
+	}
+	return strings.ToLower(tag)
+}
+
+// hasMapKey 判断映射是否含该键（nil 映射安全）。
+func hasMapKey[V any](m map[string]V, key string) bool {
+	_, ok := m[key]
+	return ok
 }
 
 // normalizeTagSet 把 pick/exclude 列表归一化为集合（geosite/geoip 标签统一小写，asn 保持原样）。
@@ -221,8 +438,8 @@ func loadGeoUpstream(url, kind string) (map[string][]Rule, error) {
 	defer os.Remove(tmp)
 
 	client := &http.Client{Timeout: httpTimeout}
-	if !downloadWithRetry(client, url, tmp, fetchRetries) {
-		return nil, fmt.Errorf("下载失败")
+	if err := downloadWithRetry(client, url, tmp, fetchRetries); err != nil {
+		return nil, fmt.Errorf("下载 geo 上游失败: %w", err)
 	}
 
 	var m map[string][]Rule
@@ -263,7 +480,11 @@ func pickMatches(kind, tag string, pick map[string]bool) bool {
 var asnHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
 // FetchASNPrefixes 从 RIPEstat 拉取 ASN 的宣告网段，返回 IP-CIDR 列表。
-func FetchASNPrefixes(asn uint32) ([]string, error) {
+//
+// 声明为函数变量（而非普通函数）是为了给离线测试留出替换点：
+// 回归测试可临时替换该变量以 mock 网络，避免依赖真实外网。
+// 生产路径不做任何替换，行为与普通函数一致。
+var FetchASNPrefixes = func(asn uint32) ([]string, error) {
 	return fetchRIPEstat(asn)
 }
 
@@ -326,7 +547,7 @@ func ExportGeoData(cfg *Config, store *GeoDataStore, results map[string]*Process
 	needGeoIP := cfg.Global.Geodata.GeoIP.Enable
 	needMMDB := cfg.Global.Geodata.MMDB.Enable
 
-	// ASN 网段表（IP-ASN 规则识别），共享给 geoip.dat 与 country.mmdb。
+	// ASN 网段表（IP-ASN 规则识别），同时喂给 geoip.dat 与两份 mmdb（country.mmdb / asn.mmdb）。
 	var asnTags map[string][]Rule
 	if needGeoIP || needMMDB {
 		asnTags = collectASNTags(results)
@@ -338,17 +559,7 @@ func ExportGeoData(cfg *Config, store *GeoDataStore, results map[string]*Process
 	}
 
 	if cfg.Global.Geodata.GeoSite.Enable {
-		for _, cat := range cfg.Categories {
-			res := results[cat.Name]
-			if res == nil || !resolveVal(cat.GeoSite, true) {
-				continue
-			}
-			if rules := domRulesToSlice(res.DomRules); len(rules) > 0 {
-				geosite[cat.Name] = rules
-			} else {
-				delete(geosite, cat.Name)
-			}
-		}
+		replaceCategoryTags(geosite, cfg, results, func(cat Category) *bool { return cat.GeoSite }, domainSide)
 		if !writeOut("geosite.dat", geoSiteOutputPath, func() error { return WriteGeoSite(geoSiteOutputPath, geosite) }, len(geosite)) {
 			failed++
 		}
@@ -357,17 +568,7 @@ func ExportGeoData(cfg *Config, store *GeoDataStore, results map[string]*Process
 	// geoip.dat = geoip 上游 pick + category geoip 标签 + IP-ASN 识别。
 	if needGeoIP {
 		geoip := cloneRuleMap(store.geoip)
-		for _, cat := range cfg.Categories {
-			res := results[cat.Name]
-			if res == nil || !resolveVal(cat.GeoIP, true) {
-				continue
-			}
-			if rules := ipRulesToSlice(res.IPRules); len(rules) > 0 {
-				geoip[cat.Name] = rules
-			} else {
-				delete(geoip, cat.Name)
-			}
-		}
+		replaceCategoryTags(geoip, cfg, results, func(cat Category) *bool { return cat.GeoIP }, ipSide)
 		for tag, rules := range asnTags {
 			geoip[tag] = rules
 		}
@@ -376,25 +577,20 @@ func ExportGeoData(cfg *Config, store *GeoDataStore, results map[string]*Process
 		}
 	}
 
-	// country.mmdb = mmdb 上游 pick + category mmdb 标签 + IP-ASN 识别。
+	// mmdb.enable=true 时固定产出两份文件，且**共用同一份**已解析数据：
+	//   country.mmdb = mmdb 上游 pick + category mmdb 标签 + IP-ASN 识别，记录写 tags 数组；
+	//   asn.mmdb     = 同一份数据中的 ASN 标签，记录写 autonomous_system_number（GeoLite2-ASN 兼容）。
+	// 两份文件都只由 geodata.mmdb 的开关控制；任一份写出失败只计数与告警，不阻断另一份。
 	if needMMDB {
 		mmdb := cloneRuleMap(store.asn)
-		for _, cat := range cfg.Categories {
-			res := results[cat.Name]
-			if res == nil || !resolveVal(cat.MMDB, true) {
-				continue
-			}
-			if rules := ipRulesToSlice(res.IPRules); len(rules) > 0 {
-				mmdb[cat.Name] = rules
-			} else {
-				delete(mmdb, cat.Name)
-			}
-		}
+		replaceCategoryTags(mmdb, cfg, results, func(cat Category) *bool { return cat.MMDB }, ipSide)
 		for tag, rules := range asnTags {
 			mmdb[tag] = rules
 		}
-		onlyASN := cfg.Global.Geodata.MMDB.OnlyASN
-		if !writeOut("country.mmdb", countryOutputPath, func() error { return WriteMMDB(countryOutputPath, mmdb, onlyASN) }, len(mmdb)) {
+		if !writeOut("country.mmdb", countryOutputPath, func() error { return WriteMMDB(countryOutputPath, mmdb) }, len(mmdb)) {
+			failed++
+		}
+		if !writeOut("asn.mmdb", asnOutputPath, func() error { return WriteASNMMDB(asnOutputPath, mmdb) }, len(mmdb)) {
 			failed++
 		}
 	}
@@ -405,9 +601,48 @@ func ExportGeoData(cfg *Config, store *GeoDataStore, results map[string]*Process
 	return asnRuleCount
 }
 
+// replaceCategoryTags 用各 category 的处理结果覆盖（或删除）同名标签。
+//
+// 语义：category 级开关为 false → **跳过**该 category（上游标签原样保留）；
+// 未覆盖（nil）→ 视为 true；结果为空 → **删除**同名标签。
+//
+// 三个产物（geosite.dat / geoip.dat / country.mmdb）的覆盖逻辑只有两处差异——
+// "取哪个开关"与"取域名还是 IP 规则"，因此把差异参数化，共用这一份实现。
+func replaceCategoryTags(
+	dst map[string][]Rule,
+	cfg *Config,
+	results map[string]*ProcessedResult,
+	override func(Category) *bool,
+	side ruleSide,
+) {
+	toRules := side.toRules
+	for _, cat := range cfg.Categories {
+		res := results[cat.Name]
+		if res == nil || !resolveVal(override(cat), true) {
+			continue
+		}
+		if rules := toRules(side.pick(res)); len(rules) > 0 {
+			dst[cat.Name] = rules
+		} else {
+			delete(dst, cat.Name)
+		}
+	}
+}
+
+// ruleSide 描述"从 ProcessedResult 的哪一侧取规则、以及如何展开为 []Rule"。
+type ruleSide struct {
+	pick    func(*ProcessedResult) map[string][]string
+	toRules func(map[string][]string) []Rule
+}
+
+var (
+	domainSide = ruleSide{func(r *ProcessedResult) map[string][]string { return r.DomRules }, domRulesToSlice}
+	ipSide     = ruleSide{func(r *ProcessedResult) map[string][]string { return r.IPRules }, ipRulesToSlice}
+)
+
 // collectASNTags 从所有规则集的 IP-ASN 规则提取 AS 号，自动拉取网段，返回 "AS<number>" -> IP-CIDR。
 // 这样即使不配置 geo/mmdb 上游，也能从分散上游（如 Telegram.list）与 add/<name>.list 中的
-// IP-ASN 规则自动识别网段，共享给 geoip.dat 与 country.mmdb。
+// IP-ASN 规则自动识别网段，共享给 geoip.dat 与两份 mmdb（country.mmdb / asn.mmdb）。
 func collectASNTags(results map[string]*ProcessedResult) map[string][]Rule {
 	asnTags := map[string][]Rule{}
 	for _, res := range results {

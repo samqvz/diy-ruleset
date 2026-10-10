@@ -46,8 +46,10 @@ var (
 		"PROCESS-NAME": "process_name", "PROCESS-PATH": "process_path",
 		"IP-CIDR": "ip_cidr", "IP-CIDR6": "ip_cidr", "DST-PORT": "port",
 	}
-	domKeys = []string{"DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD", "DOMAIN-WILDCARD", "DOMAIN-REGEX", "URL-REGEX", "PROCESS-NAME", "PROCESS-PATH", "USER-AGENT"}
-	ipKeys  = []string{"DST-PORT", "IP-ASN"}
+	// domKeys / ipKeys 与 processor.go 的 domainRuleTypes / ipSideTypes 同源，
+	// 避免"报表计数口径"与"导出遍历口径"两处字面量各自漂移。
+	domKeys = domainRuleTypes
+	ipKeys  = ipSideTypes[:]
 )
 
 func countRules(dom map[string][]string, ip map[string][]string) int {

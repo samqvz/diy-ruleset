@@ -15,15 +15,14 @@ global:
 
   # Geo / ASN 数据文件（可选，详见 README「Geo 与 ASN 规则」章节）
   # geosite / geoip / mmdb 各自独立，统一对象形式；输出路径固定为
-  # publish/geosite.dat、publish/geoip.dat、publish/country.mmdb。
+  # publish/geosite.dat、publish/geoip.dat、publish/country.mmdb、publish/asn.mmdb。
   geodata:
     geosite:
       enable: true    # 默认 false。true=生成 publish/geosite.dat（默认所有 category 的域名规则）
     geoip:
       enable: true    # 默认 false。true=生成 publish/geoip.dat（默认所有 category 的 IP 规则）
     mmdb:
-      enable: true    # 默认 false。true=生成 publish/country.mmdb
-      only_asn: true  # 默认 false。true=mmdb 仅写 ASN 规则；false=与 geoip.dat 一致（国家/ASN/category）
+      enable: true    # 默认 false。true=同时生成 publish/country.mmdb（tags：国家码/ASN/category）与 publish/asn.mmdb（仅 ASN，GeoLite2-ASN 兼容）
     # 需要拉取上游时，在对应类型下加 upstreams（URL 列表，类型由外层决定）与 pick：
     # geosite:
     #   enable: true
@@ -38,7 +37,6 @@ global:
     #   exclude: []                  # 默认空。从 pick 结果剔除（黑名单，大小写不敏感）
     # mmdb:
     #   enable: true
-    #   only_asn: true               # 可选：true=仅写 ASN 规则
     #   upstreams: ["https://raw.githubusercontent.com/Loyalsoldier/geoip/release/Country.mmdb"]
     #   pick: [AS13335]              # 上游没有的 AS 号会自动拉取网段
     #   exclude: []                  # 默认空。从 pick 结果剔除（黑名单，大小写不敏感）
@@ -89,6 +87,12 @@ categories:
       - {url: "https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/direct.txt", parser: "clash"}
       - {url: "https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/cncidr.txt"}
       - {url: "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/ChinaMax/ChinaMax.list"}
+      # 也可直接引用 Geo/ASN 数据里的标签（本 category 精确继承该标签的规则集）：
+      # - {url: "geosite:cn"}     # 继承 geosite 的 cn 标签（域名规则）
+      # - {url: "geoip:cn"}       # 继承 geoip 的 cn 标签（IP 规则）
+      # - {url: "asn:AS13335"}    # 继承某 ASN 的网段（等价写法 asn:13335）
+      # 注意：引用形态下不要写 parser（引用文件恒为 Clash 规则行，写了会被配置校验拒绝）。
+      #      标签缺失时会告警并跳过该条，不影响本 category 的其它上游。
 
   # ---------- 示例 2：去广告拦截（演示白名单与远程剔除） ----------
   - name: "reject"

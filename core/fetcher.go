@@ -2,6 +2,7 @@ package core
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,6 +19,13 @@ const (
 	maxFetchWorker = 30
 )
 
+// fetchTarget 是一次待下载的"上游 → 本地槽位文件"映射。
+type fetchTarget struct {
+	label string // 失败清单中的来源标签（普通上游为 category 名，剔除为 Remove-<category>）
+	url   string
+	dest  string
+}
+
 // FetchAll 并发拉取所有上游规则文件到 temp/raw，并做二进制格式（.srs/.mrs/.json）预处理。
 // 单个上游失败不会中断整体流程，仅汇总告警。
 // store 用于把 pick 选中的 geo/mmdb 标签物化为规则集（合并进同名 category 或新建 category）。
@@ -31,6 +39,11 @@ func FetchAll(cfg *Config, store *GeoDataStore) {
 	// 物化 pick 标签：写规则到 temp/raw，合并/新建 category。
 	materializePickCategories(cfg, store)
 
+	// 物化 categories.upstreams 里的 Geo 标签引用（geosite:/geoip:/asn:）：同样把规则写进
+	// temp/raw 并把 url 改写为 geopick: 虚拟上游形态（下载阶段据此跳过）。
+	// 必须在这里完成——紧随其后就是并发下载与并发 ProcessCategory，对 cfg 的写入不能与并发读重叠。
+	materializeGeoRefUpstreams(cfg, store)
+
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, maxFetchWorker)
 	client := &http.Client{Timeout: httpTimeout}
@@ -38,36 +51,49 @@ func FetchAll(cfg *Config, store *GeoDataStore) {
 	var failedURLs []string
 	var failMu sync.Mutex
 
-	download := func(label, url, dest string) {
-		if !downloadWithRetry(client, url, dest, fetchRetries) {
+	download := func(t fetchTarget) {
+		if err := downloadWithRetry(client, t.url, t.dest, fetchRetries); err != nil {
 			failMu.Lock()
-			failedURLs = append(failedURLs, fmt.Sprintf("[%s] %s", label, url))
+			failedURLs = append(failedURLs, fmt.Sprintf("[%s] %s", t.label, t.url))
 			failMu.Unlock()
 		}
 	}
 
+	// 上游与剔除列表走**同一条**下载路径：两处若各写一份 goroutine + 信号量 + 计数
+	// 闭包，任一处改动（如跳过判定）都会产生不对称行为。
 	for _, cat := range cfg.Categories {
+		var targets []fetchTarget
 		for i, up := range cat.Upstreams {
-			if up.URL == "" || strings.HasPrefix(up.URL, geopickPrefix) {
+			// 虚拟上游（已物化的 geopick: 形态，或未命中标签的 geo 标签引用）规则已在
+			// temp/raw 就位，不能当真实 URL 下载——否则会把"引用了不存在的标签"
+			// 误报成"下载失败"。判定收敛在 isVirtualUpstream 一处。
+			if up.URL == "" || isVirtualUpstream(up.URL) {
 				continue
 			}
-			dest := fmt.Sprintf("%s/%s_%d.txt", "temp/raw", cat.Name, i+1)
-			wg.Go(func() {
-				sem <- struct{}{}
-				defer func() { <-sem }()
-				download(cat.Name, up.URL, dest)
+			targets = append(targets, fetchTarget{
+				label: cat.Name,
+				url:   up.URL,
+				dest:  fmt.Sprintf("%s/%s_%d.txt", "temp/raw", cat.Name, i+1),
 			})
 		}
-
 		for i, rmUp := range cat.RemoveURLs {
-			if rmUp.URL == "" {
+			// 与上游同一契约：虚拟上游（geopick: 形态或 geo 标签引用）不是可下载地址。
+			// remove 侧目前无物化路径，但用户若把引用写进 remove_urls，这里必须同样跳过，
+			// 否则会出现"上游跳过、剔除却当真实 URL 下载"的不对称行为与误导性失败清单。
+			if rmUp.URL == "" || isVirtualUpstream(rmUp.URL) {
 				continue
 			}
-			dest := fmt.Sprintf("%s/rm_%s_%d.txt", "temp/raw", cat.Name, i+1)
+			targets = append(targets, fetchTarget{
+				label: "Remove-" + cat.Name,
+				url:   rmUp.URL,
+				dest:  fmt.Sprintf("%s/rm_%s_%d.txt", "temp/raw", cat.Name, i+1),
+			})
+		}
+		for _, t := range targets {
 			wg.Go(func() {
 				sem <- struct{}{}
 				defer func() { <-sem }()
-				download("Remove-"+cat.Name, rmUp.URL, dest)
+				download(t)
 			})
 		}
 	}
@@ -85,25 +111,30 @@ func FetchAll(cfg *Config, store *GeoDataStore) {
 	}
 }
 
-// downloadWithRetry 带重试地下载单个 URL；失败时清理残留文件并返回 false。
-func downloadWithRetry(client *http.Client, url, dest string, retries int) bool {
-	for attempt := 0; attempt < retries; attempt++ {
+// downloadWithRetry 带重试地下载单个 URL；重试耗尽后返回最后一次的错误。
+// 成功时不返回错误，失败时清理残留文件由 downloadOnce 负责。
+func downloadWithRetry(client *http.Client, url, dest string, retries int) error {
+	var lastErr error
+	for attempt := range retries {
 		if attempt > 0 {
 			time.Sleep(fetchRetryGap)
 		}
-		if downloadOnce(client, url, dest) {
-			return true
+		if err := downloadOnce(client, url, dest); err == nil {
+			return nil
+		} else {
+			lastErr = err
 		}
 	}
-	return false
+	return fmt.Errorf("重试 %d 次后仍失败: %w", retries, lastErr)
 }
 
 // downloadOnce 执行一次下载 + 二进制预处理。任何环节失败都会清理目标文件。
-func downloadOnce(client *http.Client, url, dest string) bool {
+// 返回的 error 只用于诊断（调用方按"重试 N 次后计入失败清单"处置），
+// 因此这里为每个失败分支补上上下文（URL / 目标路径 / HTTP 状态）。
+func downloadOnce(client *http.Client, url, dest string) error {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
-		fmt.Printf("⚠️ 无效的上游 URL [%s]: %v\n", url, err)
-		return false
+		return fmt.Errorf("无效的上游 URL: %w", err)
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0")
 	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
@@ -112,32 +143,30 @@ func downloadOnce(client *http.Client, url, dest string) bool {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return false
+		return fmt.Errorf("请求失败: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return false
+		return fmt.Errorf("HTTP 状态码 %d", resp.StatusCode)
 	}
 
 	out, err := os.Create(dest)
 	if err != nil {
-		return false
+		return fmt.Errorf("无法创建目标文件 [%s]: %w", dest, err)
 	}
 	_, copyErr := io.Copy(out, resp.Body)
 	closeErr := out.Close()
 	if copyErr != nil || closeErr != nil {
 		_ = os.Remove(dest)
-		fmt.Printf("⚠️ 警告：%s 下载不完整，已移除损坏的文件。\n", url)
-		return false
+		return fmt.Errorf("下载不完整（已移除损坏文件 [%s]）: %w", dest, errors.Join(copyErr, closeErr))
 	}
 
 	if err := postProcessBinary(url, dest); err != nil {
-		fmt.Printf("⚠️ 警告：处理二进制文件失败 [%s]: %v\n", url, err)
 		_ = os.Remove(dest)
-		return false
+		return fmt.Errorf("二进制预处理失败: %w", err)
 	}
-	return true
+	return nil
 }
 
 // postProcessBinary 根据扩展名把二进制规则集转换为可解析的文本。

@@ -167,11 +167,12 @@ DIY-Ruleset/
 | :--- | :--- | :--- | :--- |
 | geosite.dat | v2ray GeoSite（protobuf） | 域名规则集合 | 站点/分类名，如 `google` |
 | geoip.dat | v2ray GeoIP（protobuf） | IP 网段集合 | 国家码 / ASN 号 / 分类名 |
-| country.mmdb | MaxMind mmdb | IP 网段集合 | 国家码 / ASN 号 / 分类名（`only_asn` 时仅 ASN） |
+| country.mmdb | MaxMind mmdb | IP 网段集合 | 国家码 / ASN 号 / 分类名（记录为 `tags` 数组） |
+| asn.mmdb | MaxMind mmdb | IP 网段集合 | 仅 ASN（记录为 `autonomous_system_number`，GeoLite2-ASN 兼容） |
 
 ### 输出 GeoSite / GeoIP / ASN 文件
 
-在 `global.geodata` 用 `geosite` / `geoip` / `mmdb` 控制是否生成（统一对象形式），路径固定为 `publish/geosite.dat`、`publish/geoip.dat`、`publish/country.mmdb`：
+在 `global.geodata` 用 `geosite` / `geoip` / `mmdb` 控制是否生成（统一对象形式），路径固定为 `publish/geosite.dat`、`publish/geoip.dat`、`publish/country.mmdb`、`publish/asn.mmdb`：
 
 ```yaml
 global:
@@ -181,12 +182,15 @@ global:
     geoip:
       enable: true
     mmdb:
-      enable: true
-      only_asn: false # false（默认）=与 geoip.dat 一致（国家/ASN/category）；true=仅写 ASN
+      enable: true   # true=同时生成 country.mmdb 与 asn.mmdb；false=两个都不生成
 ```
 
 - 开启后默认把**所有 category** 的去重结果打包进对应文件（标签 = 规则集名）：`geosite` 打包域名规则，`geoip` / `mmdb` 打包 IP 规则。
-- `geoip.dat` 与 `country.mmdb` **各自独立**（各自的 pick 互不影响），均可包含**国家码标签**（如 `cn`）、**ASN 标签**（如 `AS13335`）与 **category 标签**；`only_asn: true` 时 `country.mmdb` 仅写 ASN 记录（GeoLite2-ASN 兼容）。
+- `mmdb.enable: true` 时**固定产出两份文件**，二者同源（同一份已解析数据、不会二次拉取），schema 互斥：
+  - `country.mmdb`：全量标签，记录写成 `tags` 数组（国家码 / ASN / category 可同时命中同一网段）；
+  - `asn.mmdb`：仅 ASN 标签，记录键精确为 `autonomous_system_number`，可直接给 GeoLite2-ASN 的读取方使用。
+- **破坏性变更**：旧配置中的 `only_asn` 字段已被**彻底移除**（无别名、无兼容回退）。若配置文件里仍写着 `only_asn`，引擎会因严格字段校验**直接报错**——删掉该行即可，原「仅 ASN」能力已由 `asn.mmdb` 完整承接，同时多出一份全量 `country.mmdb`。
+- `geoip.dat` 与两份 mmdb **各自独立**（各自的 pick 互不影响），均可包含**国家码标签**（如 `cn`）、**ASN 标签**（如 `AS13335`）与 **category 标签**。
 - category 可用**同名字段覆盖**（类似 single_file 继承逻辑）：`geosite: false` 排除该规则集；`mmdb: true` 时该规则集的 IP 规则写入 country.mmdb 的 `<name>` 标签。**ASN 分组**通过在 `add/<name>.list` 写一行 `IP-ASN,13335` 实现（自动识别网段），无需额外字段。
 - 打包的是「该规则集去重后的最终结果」，**add/remove 目录、merge_from、远程剔除等全部自然生效**，无需逐条配置。
 - 若一个 category 参与打包但其去重结果为空，则不会在输出中生成该标签（避免出现空标签）。要**剔除上游拉取来的标签**，请在 `pick`/`exclude` 中配置（见下节），不要依赖此机制。
@@ -210,10 +214,32 @@ global:
       pick: [cn]
     mmdb:
       enable: true
-      only_asn: false             # false（默认）=与 geoip.dat 一致；true=仅写 ASN
       upstreams: [".../Country.mmdb"]
       pick: [AS13335]
 ```
+
+### 让 category 直接引用 Geo / ASN 标签（`geosite:` / `geoip:` / `asn:`）
+
+除了用 `pick` 把标签**物化**成规则集，还可以在 `categories[].upstreams` 里**直接引用**某个标签，让该规则集精确继承这份 Geo 数据（对应你的需求：`{url: "geosite:google"}`）：
+
+```yaml
+categories:
+  - name: "google"
+    upstreams:
+      - {url: "geosite:google"}          # 继承 geosite 的 google 标签（域名规则）
+      - {url: "geoip:google"}            # 继承 geoip 的 google 标签（IP 规则）
+      - {url: "asn:AS13335"}             # 继承某个 ASN 的网段（等价写法 asn:13335）
+      - {url: "https://.../extra.list"}  # 普通上游可与引用混用
+```
+
+行为约定：
+
+- **前缀大小写不敏感**，允许前后空白；ASN 既支持 `asn:AS13335` 也支持 `asn:13335`（内部统一为 `AS<n>`）。
+- 引用的规则与该 category 的普通上游一起进入**完全相同的解析与交叉查杀去重流水线**——同一批规则无论用 `geosite:` 引用注入还是作为普通 clash 上游注入，去重结果逐字符一致（已由回归测试锁定）。
+- **标签缺失时不静默**：若对应 `global.geodata.<类型>` 未启用、或上游没有 pick 到该标签，引擎会给出含规则集名与原始 url 的告警，并跳过该条引用；**同 category 的其它上游与其它规则集不受影响**，也不会因此发出无意义的网络请求。
+- 引用的规则**不会**被自动写入 `geosite.dat` / `geoip.dat` / `country.mmdb`（那是 `pick` 物化的职责）；若两者同时命中同一标签，去重后结果一致。
+- `parser` 字段对引用形态无意义：引用槽位文件恒为 Clash 规则行，因此**同时写 `parser` 会被配置校验直接拒绝**，避免生成解析不出任何规则的文件。
+- 配置校验（fail fast）：`geosite:` 这类**前缀命中但标签为空**的写法、以及手写内部标记 `geopick:` 都会在启动时报错。
 
 - `pick` 选中的标签会**物化为规则集**：与同名 category 合并（一同去重、增删），无同名 category 时自动新建一个同名规则集——因此这些标签既会进入 `geosite.dat` / `geoip.dat` / `country.mmdb`，也会生成对应的 mrs / srs / list 文件。
 - `exclude` 是**黑名单**：从 pick 结果中剔除指定标签，优先级高于 pick。当 `pick` 留空（选取全部）时，用 `exclude` 剔除不想要的标签即可。

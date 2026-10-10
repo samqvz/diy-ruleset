@@ -39,13 +39,29 @@ func (c *statCache) stat(path string) statEntry {
 	return e
 }
 
-// reportStatCache 是报表生成阶段共享的 stat 缓存，每次生成报表前重置。
-var reportStatCache = newStatCache()
+type reportContext struct {
+	stats       *statCache
+	repo        string
+	ghProxy     string
+	enableProxy bool
+}
 
-func resetReportStatCache() { reportStatCache = newStatCache() }
+func newReportContext(cfg *Config) *reportContext {
+	return &reportContext{
+		stats:       newStatCache(),
+		repo:        os.Getenv("GITHUB_REPOSITORY"),
+		ghProxy:     cfg.Global.EnableGhProxy.URL,
+		enableProxy: cfg.Global.EnableGhProxy.Enable,
+	}
+}
 
-func getFileSize(path string) string {
-	e := reportStatCache.stat(path)
+// fileURL 生成仓库内产物的 GitHub 原始下载地址。
+func (rc *reportContext) fileURL(path string) string {
+	return fmt.Sprintf("https://github.com/%s/raw/%s", rc.repo, path)
+}
+
+func (rc *reportContext) getFileSize(path string) string {
+	e := rc.stats.stat(path)
 	if !e.ok {
 		return "-"
 	}
@@ -158,13 +174,29 @@ func buildLinksCell(proxy string, enableProxy bool, links ...LinkDef) (string, s
 	return strings.Join(directLinks, "<br>"), strings.Join(proxyLinks, "<br>")
 }
 
-func anyFileExists(paths ...string) bool {
+func (rc *reportContext) anyFileExists(paths ...string) bool {
 	for _, p := range paths {
-		if reportStatCache.stat(p).ok {
+		if rc.stats.stat(p).ok {
 			return true
 		}
 	}
 	return false
+}
+
+// firstExistingCount 在"候选文件 → 计数键"表中按**声明顺序**取第一个真实存在的文件对应的计数。
+func (rc *reportContext) firstExistingCount(cands []countCandidate) int {
+	for _, c := range cands {
+		if rc.anyFileExists(c.file) {
+			return c.count
+		}
+	}
+	return 0
+}
+
+// countCandidate 把一个产物文件与其在 ExactCounts 中的计数键配对。
+type countCandidate struct {
+	file  string
+	count int
 }
 
 type ReportRow struct {
@@ -198,7 +230,7 @@ func renderTableSection(sb *strings.Builder, title string, enableProxy bool, row
 
 // renderGeoDataSection 在报表中追加 Geo / ASN 文件表格。
 // 复用 buildLinksCell 生成带文件大小的链接，与其它表格保持一致。
-func renderGeoDataSection(sb *strings.Builder, cfg *Config, ghProxy string, enableProxy bool) {
+func renderGeoDataSection(sb *strings.Builder, rc *reportContext, cfg *Config) {
 	gd := cfg.Global.Geodata
 
 	type geoRow struct {
@@ -216,13 +248,14 @@ func renderGeoDataSection(sb *strings.Builder, cfg *Config, ghProxy string, enab
 	}
 	if gd.MMDB.Enable {
 		rows = append(rows, geoRow{"country", "country.mmdb", countryOutputPath, gd.MMDB.Upstreams})
+		rows = append(rows, geoRow{"asn", "asn.mmdb", asnOutputPath, gd.MMDB.Upstreams})
 	}
 	if len(rows) == 0 {
 		return
 	}
 
 	sb.WriteString("### Geo / ASN 文件\n")
-	if enableProxy {
+	if rc.enableProxy {
 		sb.WriteString("| 名&#8288;称 | 规&#8288;则&#8288;总&#8288;数 | 包&#8288;含&#8288;的&#8288;规&#8288;则 | 默&#8288;认&#8288;链&#8288;接 | 加&#8288;速&#8288;链&#8288;接 | 上&#8288;游&#8288;链&#8288;接 |\n")
 		sb.WriteString("| :--- | :--- | :--- | :--- | :--- | :--- |\n")
 	} else {
@@ -230,13 +263,11 @@ func renderGeoDataSection(sb *strings.Builder, cfg *Config, ghProxy string, enab
 		sb.WriteString("| :--- | :--- | :--- | :--- | :--- |\n")
 	}
 
-	repo := os.Getenv("GITHUB_REPOSITORY")
 	for _, r := range rows {
 		countStr, tagsStr := statGeoFile(r.display, r.path)
 
-		url := fmt.Sprintf("https://github.com/%s/raw/%s", repo, r.path)
-		cellDirect, cellProxy := buildLinksCell(ghProxy, enableProxy,
-			LinkDef{r.filename, url, getFileSize(r.path), true, "&nbsp;"},
+		cellDirect, cellProxy := buildLinksCell(rc.ghProxy, rc.enableProxy,
+			LinkDef{r.filename, rc.fileURL(r.path), rc.getFileSize(r.path), true, "&nbsp;"},
 		)
 
 		upStr := "-"
@@ -248,7 +279,7 @@ func renderGeoDataSection(sb *strings.Builder, cfg *Config, ghProxy string, enab
 			upStr = strings.Join(ups, "<br>")
 		}
 
-		if enableProxy {
+		if rc.enableProxy {
 			sb.WriteString(fmt.Sprintf("| **%s** | %s | %s | %s | %s | %s |\n", r.display, countStr, tagsStr, cellDirect, cellProxy, upStr))
 		} else {
 			sb.WriteString(fmt.Sprintf("| **%s** | %s | %s | %s | %s |\n", r.display, countStr, tagsStr, cellDirect, upStr))
@@ -266,7 +297,7 @@ func statGeoFile(kind, path string) (countStr, tagsStr string) {
 		m, err = LoadGeoSite(path)
 	case "geoip":
 		m, err = LoadGeoIP(path)
-	case "country":
+	case "country", "asn":
 		m, err = LoadMMDB(path)
 	}
 	if err != nil {
@@ -285,9 +316,7 @@ func statGeoFile(kind, path string) (countStr, tagsStr string) {
 }
 
 func GenerateReport(results map[string]*ProcessedResult, cfg *Config, asnRuleCount int) {
-	resetReportStatCache()
-	ghProxy := cfg.Global.EnableGhProxy.URL
-	enableProxy := cfg.Global.EnableGhProxy.Enable
+	rc := newReportContext(cfg)
 	const startTag = `<!-- REPORT_START -->`
 	const endTag = `<!-- REPORT_END -->`
 	var sb strings.Builder
@@ -390,8 +419,8 @@ func GenerateReport(results map[string]*ProcessedResult, cfg *Config, asnRuleCou
 				miMrsIp = fmt.Sprintf("publish/mihomo/%s_ip.mrs", catName)
 			}
 
-			hasSb := anyFileExists(sbJson, sbSrs)
-			hasMi := anyFileExists(miTxt, miYaml, miMrs) || (miMrsIp != "" && anyFileExists(miMrsIp))
+			hasSb := rc.anyFileExists(sbJson, sbSrs)
+			hasMi := rc.anyFileExists(miTxt, miYaml, miMrs) || (miMrsIp != "" && rc.anyFileExists(miMrsIp))
 
 			if !hasSb && !hasMi {
 				return
@@ -424,37 +453,37 @@ func GenerateReport(results map[string]*ProcessedResult, cfg *Config, asnRuleCou
 			var links []LinkDef
 
 			if hasSb {
-				urlJson := fmt.Sprintf("https://github.com/%s/raw/publish/singbox/%s.json", os.Getenv("GITHUB_REPOSITORY"), targetName)
-				urlSrs := fmt.Sprintf("https://github.com/%s/raw/publish/singbox/%s.srs", os.Getenv("GITHUB_REPOSITORY"), targetName)
+				urlJson := rc.fileURL(fmt.Sprintf("publish/singbox/%s.json", targetName))
+				urlSrs := rc.fileURL(fmt.Sprintf("publish/singbox/%s.srs", targetName))
 				links = append(links,
-					LinkDef{"singbox&#8288;-&#8288;json", urlJson, getFileSize(sbJson), catOut.Singbox.JSON && anyFileExists(sbJson), "&nbsp;&nbsp;"},
-					LinkDef{"singbox&#8288;-&#8288;srs", urlSrs, getFileSize(sbSrs), catOut.Singbox.SRS && anyFileExists(sbSrs), "&nbsp;&nbsp;&nbsp;&nbsp;"},
+					LinkDef{"singbox&#8288;-&#8288;json", urlJson, rc.getFileSize(sbJson), catOut.Singbox.JSON && rc.anyFileExists(sbJson), "&nbsp;&nbsp;"},
+					LinkDef{"singbox&#8288;-&#8288;srs", urlSrs, rc.getFileSize(sbSrs), catOut.Singbox.SRS && rc.anyFileExists(sbSrs), "&nbsp;&nbsp;&nbsp;&nbsp;"},
 				)
 			}
 
 			if hasMi {
-				urlTxt := fmt.Sprintf("https://github.com/%s/raw/publish/mihomo/%s.txt", os.Getenv("GITHUB_REPOSITORY"), targetName)
-				urlYaml := fmt.Sprintf("https://github.com/%s/raw/publish/mihomo/%s.yaml", os.Getenv("GITHUB_REPOSITORY"), targetName)
-				urlMrs := fmt.Sprintf("https://github.com/%s/raw/publish/mihomo/%s.mrs", os.Getenv("GITHUB_REPOSITORY"), targetName)
+				urlTxt := rc.fileURL(fmt.Sprintf("publish/mihomo/%s.txt", targetName))
+				urlYaml := rc.fileURL(fmt.Sprintf("publish/mihomo/%s.yaml", targetName))
+				urlMrs := rc.fileURL(fmt.Sprintf("publish/mihomo/%s.mrs", targetName))
 
 				mrsLabel := "mihomo&#8288;-&#8288;mrs"
-				if miMrsIp != "" && anyFileExists(miMrsIp) && anyFileExists(miMrs) {
+				if miMrsIp != "" && rc.anyFileExists(miMrsIp) && rc.anyFileExists(miMrs) {
 					mrsLabel = "mihomo&#8288;-&#8288;mrs&#8288;(&#8288;domain&#8288;)"
 				}
 
 				links = append(links,
-					LinkDef{"mihomo&#8288;-&#8288;txt", urlTxt, getFileSize(miTxt), catOut.Mihomo.TXT && anyFileExists(miTxt), "&nbsp;&nbsp;&nbsp;&nbsp;"},
-					LinkDef{"mihomo&#8288;-&#8288;yaml", urlYaml, getFileSize(miYaml), catOut.Mihomo.YAML && anyFileExists(miYaml), "&nbsp;"},
-					LinkDef{mrsLabel, urlMrs, getFileSize(miMrs), catOut.Mihomo.MRS && anyFileExists(miMrs), "&nbsp;&nbsp;"},
+					LinkDef{"mihomo&#8288;-&#8288;txt", urlTxt, rc.getFileSize(miTxt), catOut.Mihomo.TXT && rc.anyFileExists(miTxt), "&nbsp;&nbsp;&nbsp;&nbsp;"},
+					LinkDef{"mihomo&#8288;-&#8288;yaml", urlYaml, rc.getFileSize(miYaml), catOut.Mihomo.YAML && rc.anyFileExists(miYaml), "&nbsp;"},
+					LinkDef{mrsLabel, urlMrs, rc.getFileSize(miMrs), catOut.Mihomo.MRS && rc.anyFileExists(miMrs), "&nbsp;&nbsp;"},
 				)
 
-				if miMrsIp != "" && anyFileExists(miMrsIp) {
-					urlMrsIp := fmt.Sprintf("https://github.com/%s/raw/publish/mihomo/%s_ip.mrs", os.Getenv("GITHUB_REPOSITORY"), catName)
-					links = append(links, LinkDef{"mihomo&#8288;-&#8288;mrs&#8288;(&#8288;ipcidr&#8288;)", urlMrsIp, getFileSize(miMrsIp), catOut.Mihomo.MRS, "&nbsp;&nbsp;"})
+				if miMrsIp != "" && rc.anyFileExists(miMrsIp) {
+					urlMrsIp := rc.fileURL(fmt.Sprintf("publish/mihomo/%s_ip.mrs", catName))
+					links = append(links, LinkDef{"mihomo&#8288;-&#8288;mrs&#8288;(&#8288;ipcidr&#8288;)", urlMrsIp, rc.getFileSize(miMrsIp), catOut.Mihomo.MRS, "&nbsp;&nbsp;"})
 				}
 			}
 
-			cellDirect, cellProxy := buildLinksCell(ghProxy, enableProxy, links...)
+			cellDirect, cellProxy := buildLinksCell(rc.ghProxy, rc.enableProxy, links...)
 			coreRows = append(coreRows, ReportRow{displayName, count, cellDirect, cellProxy})
 		}
 
@@ -468,7 +497,7 @@ func GenerateReport(results map[string]*ProcessedResult, cfg *Config, asnRuleCou
 			renderCoreRow("_white", "white")
 		}
 	}
-	renderTableSection(&sb, "Sing-Box & Mihomo (Clash Meta)", enableProxy, coreRows)
+	renderTableSection(&sb, "Sing-Box & Mihomo (Clash Meta)", rc.enableProxy, coreRows)
 
 	var appleRows []ReportRow
 
@@ -496,66 +525,31 @@ func GenerateReport(results map[string]*ProcessedResult, cfg *Config, asnRuleCou
 			stashFile := fmt.Sprintf("publish/stash/%s.list", targetName)
 			egernFile := fmt.Sprintf("publish/egern/%s.yaml", targetName)
 
-			if anyFileExists(surgeFile, srFile, qxFile, loonFile, stashFile, egernFile) {
-				var linesCount int
-				if rowType == "white" {
-					if anyFileExists(surgeFile) {
-						linesCount = r.ExactCounts["surge_total_white"]
-					} else if anyFileExists(srFile) {
-						linesCount = r.ExactCounts["shadowrocket_total_white"]
-					} else if anyFileExists(qxFile) {
-						linesCount = r.ExactCounts["quantumultx_total_white"]
-					} else if anyFileExists(loonFile) {
-						linesCount = r.ExactCounts["loon_total_white"]
-					} else if anyFileExists(stashFile) {
-						linesCount = r.ExactCounts["stash_total_white"]
-					} else if anyFileExists(egernFile) {
-						linesCount = r.ExactCounts["egern_total_white"]
-					}
-				} else if suffix == "_ip" {
-					if anyFileExists(surgeFile) {
-						linesCount = r.ExactCounts["surge_ip"]
-					} else if anyFileExists(srFile) {
-						linesCount = r.ExactCounts["shadowrocket_ip"]
-					} else if anyFileExists(qxFile) {
-						linesCount = r.ExactCounts["quantumultx_ip"]
-					} else if anyFileExists(loonFile) {
-						linesCount = r.ExactCounts["loon_ip"]
-					} else if anyFileExists(stashFile) {
-						linesCount = r.ExactCounts["stash_ip"]
-					} else if anyFileExists(egernFile) {
-						linesCount = r.ExactCounts["egern_ip"]
-					}
-				} else {
-					if anyFileExists(surgeFile) {
-						linesCount = r.ExactCounts["surge_total"]
-					} else if anyFileExists(srFile) {
-						linesCount = r.ExactCounts["shadowrocket_total"]
-					} else if anyFileExists(qxFile) {
-						linesCount = r.ExactCounts["quantumultx_total"]
-					} else if anyFileExists(loonFile) {
-						linesCount = r.ExactCounts["loon_total"]
-					} else if anyFileExists(stashFile) {
-						linesCount = r.ExactCounts["stash_total"]
-					} else if anyFileExists(egernFile) {
-						linesCount = r.ExactCounts["egern_total"]
-					}
+			if rc.anyFileExists(surgeFile, srFile, qxFile, loonFile, stashFile, egernFile) {
+				// 计数键 = <client>_<total|ip|total_white>；取第一个真实存在的产物文件对应的计数。
+				suffixKey := "total"
+				switch rowType {
+				case "white":
+					suffixKey = "total_white"
+				case "ip":
+					suffixKey = "ip"
 				}
+				linesCount := rc.firstExistingCount([]countCandidate{
+					{surgeFile, r.ExactCounts["surge_"+suffixKey]},
+					{srFile, r.ExactCounts["shadowrocket_"+suffixKey]},
+					{qxFile, r.ExactCounts["quantumultx_"+suffixKey]},
+					{loonFile, r.ExactCounts["loon_"+suffixKey]},
+					{stashFile, r.ExactCounts["stash_"+suffixKey]},
+					{egernFile, r.ExactCounts["egern_"+suffixKey]},
+				})
 
-				urlSurge := fmt.Sprintf("https://github.com/%s/raw/publish/surge/%s.list", os.Getenv("GITHUB_REPOSITORY"), targetName)
-				urlSr := fmt.Sprintf("https://github.com/%s/raw/publish/shadowrocket/%s.list", os.Getenv("GITHUB_REPOSITORY"), targetName)
-				urlQx := fmt.Sprintf("https://github.com/%s/raw/publish/quantumultx/%s.list", os.Getenv("GITHUB_REPOSITORY"), targetName)
-				urlLoon := fmt.Sprintf("https://github.com/%s/raw/publish/loon/%s.list", os.Getenv("GITHUB_REPOSITORY"), targetName)
-				urlStash := fmt.Sprintf("https://github.com/%s/raw/publish/stash/%s.list", os.Getenv("GITHUB_REPOSITORY"), targetName)
-				urlEgern := fmt.Sprintf("https://github.com/%s/raw/publish/egern/%s.yaml", os.Getenv("GITHUB_REPOSITORY"), targetName)
-
-				cellDirect, cellProxy := buildLinksCell(ghProxy, enableProxy,
-					LinkDef{"loon", urlLoon, getFileSize(loonFile), catOut.Loon.Enable && anyFileExists(loonFile), "&nbsp;&nbsp;&nbsp;"},
-					LinkDef{"surge", urlSurge, getFileSize(surgeFile), catOut.Surge.Enable && anyFileExists(surgeFile), "&nbsp;"},
-					LinkDef{"egern", urlEgern, getFileSize(egernFile), catOut.Egern.Enable && anyFileExists(egernFile), "&nbsp;"},
-					LinkDef{"stash", urlStash, getFileSize(stashFile), catOut.Stash.Enable && anyFileExists(stashFile), "&nbsp;&nbsp;"},
-					LinkDef{"shadowrocket", urlSr, getFileSize(srFile), catOut.Shadowrocket.Enable && anyFileExists(srFile), "&nbsp;"},
-					LinkDef{"quantumultx", urlQx, getFileSize(qxFile), catOut.QuantumultX.Enable && anyFileExists(qxFile), "&nbsp;&nbsp;&nbsp;"},
+				cellDirect, cellProxy := buildLinksCell(rc.ghProxy, rc.enableProxy,
+					LinkDef{"loon", rc.fileURL(fmt.Sprintf("publish/loon/%s.list", targetName)), rc.getFileSize(loonFile), catOut.Loon.Enable && rc.anyFileExists(loonFile), "&nbsp;&nbsp;&nbsp;"},
+					LinkDef{"surge", rc.fileURL(fmt.Sprintf("publish/surge/%s.list", targetName)), rc.getFileSize(surgeFile), catOut.Surge.Enable && rc.anyFileExists(surgeFile), "&nbsp;"},
+					LinkDef{"egern", rc.fileURL(fmt.Sprintf("publish/egern/%s.yaml", targetName)), rc.getFileSize(egernFile), catOut.Egern.Enable && rc.anyFileExists(egernFile), "&nbsp;"},
+					LinkDef{"stash", rc.fileURL(fmt.Sprintf("publish/stash/%s.list", targetName)), rc.getFileSize(stashFile), catOut.Stash.Enable && rc.anyFileExists(stashFile), "&nbsp;&nbsp;"},
+					LinkDef{"shadowrocket", rc.fileURL(fmt.Sprintf("publish/shadowrocket/%s.list", targetName)), rc.getFileSize(srFile), catOut.Shadowrocket.Enable && rc.anyFileExists(srFile), "&nbsp;"},
+					LinkDef{"quantumultx", rc.fileURL(fmt.Sprintf("publish/quantumultx/%s.list", targetName)), rc.getFileSize(qxFile), catOut.QuantumultX.Enable && rc.anyFileExists(qxFile), "&nbsp;&nbsp;&nbsp;"},
 				)
 				appleRows = append(appleRows, ReportRow{displayName, linesCount, cellDirect, cellProxy})
 			}
@@ -566,7 +560,7 @@ func GenerateReport(results map[string]*ProcessedResult, cfg *Config, asnRuleCou
 			renderAppleRow("_white", "white")
 		}
 	}
-	renderTableSection(&sb, "Loon / Surge / Quantumultx / Shadowrocket / Egern / Stash", enableProxy, appleRows)
+	renderTableSection(&sb, "Loon / Surge / Quantumultx / Shadowrocket / Egern / Stash", rc.enableProxy, appleRows)
 
 	var v2rayRows []ReportRow
 
@@ -589,7 +583,7 @@ func GenerateReport(results map[string]*ProcessedResult, cfg *Config, asnRuleCou
 			}
 			displayName := strings.ReplaceAll(targetName, "-", "&#8209;")
 			v2File := fmt.Sprintf("publish/v2ray/%s.txt", targetName)
-			if anyFileExists(v2File) {
+			if rc.anyFileExists(v2File) {
 				var linesCount int
 				switch rowType {
 				case "white":
@@ -620,8 +614,8 @@ func GenerateReport(results map[string]*ProcessedResult, cfg *Config, asnRuleCou
 					label = "v2ray&#8288;-&#8288;white"
 				}
 
-				urlV2 := fmt.Sprintf("https://github.com/%s/raw/publish/v2ray/%s.txt", os.Getenv("GITHUB_REPOSITORY"), targetName)
-				cellDirect, cellProxy := buildLinksCell(ghProxy, enableProxy, LinkDef{label, urlV2, getFileSize(v2File), true, "&nbsp;"})
+				urlV2 := rc.fileURL(fmt.Sprintf("publish/v2ray/%s.txt", targetName))
+				cellDirect, cellProxy := buildLinksCell(rc.ghProxy, rc.enableProxy, LinkDef{label, urlV2, rc.getFileSize(v2File), true, "&nbsp;"})
 				v2rayRows = append(v2rayRows, ReportRow{displayName, linesCount, cellDirect, cellProxy})
 			}
 		}
@@ -635,7 +629,7 @@ func GenerateReport(results map[string]*ProcessedResult, cfg *Config, asnRuleCou
 			renderV2rayRow("_white", "white")
 		}
 	}
-	renderTableSection(&sb, "V2Ray (TXT)", enableProxy, v2rayRows)
+	renderTableSection(&sb, "V2Ray (TXT)", rc.enableProxy, v2rayRows)
 
 	var dnsRows []ReportRow
 
@@ -655,24 +649,20 @@ func GenerateReport(results map[string]*ProcessedResult, cfg *Config, asnRuleCou
 			adgFile := fmt.Sprintf("publish/adblock/%s.txt", targetName)
 			dnsmasqFile := fmt.Sprintf("publish/dnsmasq/%s.conf", targetName)
 			smartdnsFile := fmt.Sprintf("publish/smartdns/%s.conf", targetName)
-			if anyFileExists(adgFile, dnsmasqFile, smartdnsFile) {
-				var linesCount int
-				if anyFileExists(adgFile) {
-					linesCount = getLineCount(adgFile)
-				} else if anyFileExists(dnsmasqFile) {
-					linesCount = getLineCount(dnsmasqFile)
-				} else if anyFileExists(smartdnsFile) {
-					linesCount = getLineCount(smartdnsFile)
+			if rc.anyFileExists(adgFile, dnsmasqFile, smartdnsFile) {
+				// 行数直接读文件；取第一个真实存在的产物文件。
+				linesCount := 0
+				for _, f := range []string{adgFile, dnsmasqFile, smartdnsFile} {
+					if rc.anyFileExists(f) {
+						linesCount = getLineCount(f)
+						break
+					}
 				}
 
-				urlAdg := fmt.Sprintf("https://github.com/%s/raw/publish/adblock/%s.txt", os.Getenv("GITHUB_REPOSITORY"), targetName)
-				urlDnsmasq := fmt.Sprintf("https://github.com/%s/raw/publish/dnsmasq/%s.conf", os.Getenv("GITHUB_REPOSITORY"), targetName)
-				urlSmartdns := fmt.Sprintf("https://github.com/%s/raw/publish/smartdns/%s.conf", os.Getenv("GITHUB_REPOSITORY"), targetName)
-
-				cellDirect, cellProxy := buildLinksCell(ghProxy, enableProxy,
-					LinkDef{"adblock", urlAdg, getFileSize(adgFile), cat.PublishAdblock && anyFileExists(adgFile), "&nbsp;&nbsp;&nbsp;"},
-					LinkDef{"dnsmasq", urlDnsmasq, getFileSize(dnsmasqFile), cat.PublishDnsmasq && anyFileExists(dnsmasqFile), "&nbsp;"},
-					LinkDef{"smartdns", urlSmartdns, getFileSize(smartdnsFile), cat.PublishSmartDNS && anyFileExists(smartdnsFile), "&nbsp;"},
+				cellDirect, cellProxy := buildLinksCell(rc.ghProxy, rc.enableProxy,
+					LinkDef{"adblock", rc.fileURL(fmt.Sprintf("publish/adblock/%s.txt", targetName)), rc.getFileSize(adgFile), cat.PublishAdblock && rc.anyFileExists(adgFile), "&nbsp;&nbsp;&nbsp;"},
+					LinkDef{"dnsmasq", rc.fileURL(fmt.Sprintf("publish/dnsmasq/%s.conf", targetName)), rc.getFileSize(dnsmasqFile), cat.PublishDnsmasq && rc.anyFileExists(dnsmasqFile), "&nbsp;"},
+					LinkDef{"smartdns", rc.fileURL(fmt.Sprintf("publish/smartdns/%s.conf", targetName)), rc.getFileSize(smartdnsFile), cat.PublishSmartDNS && rc.anyFileExists(smartdnsFile), "&nbsp;"},
 				)
 				dnsRows = append(dnsRows, ReportRow{displayName, linesCount, cellDirect, cellProxy})
 			}
@@ -682,7 +672,7 @@ func GenerateReport(results map[string]*ProcessedResult, cfg *Config, asnRuleCou
 			renderDnsRow("_white", "white")
 		}
 	}
-	renderTableSection(&sb, "其它服务端 (DNS & Adblock)", enableProxy, dnsRows)
+	renderTableSection(&sb, "其它服务端 (DNS & Adblock)", rc.enableProxy, dnsRows)
 
 	if cfg.Global.SplitCNIP {
 		var cnipRows []ReportRow
@@ -702,21 +692,18 @@ func GenerateReport(results map[string]*ProcessedResult, cfg *Config, asnRuleCou
 				srsFile := fmt.Sprintf("publish/cnip/%s.srs", name)
 				mrsFile := fmt.Sprintf("publish/cnip/%s.mrs", name)
 
-				if anyFileExists(txtFile) {
+				if rc.anyFileExists(txtFile) {
 					var links []LinkDef
-					urlTxt := fmt.Sprintf("https://github.com/%s/raw/publish/cnip/%s.txt", os.Getenv("GITHUB_REPOSITORY"), name)
-					links = append(links, LinkDef{"TXT", urlTxt, getFileSize(txtFile), true, "&nbsp;"})
+					links = append(links, LinkDef{"TXT", rc.fileURL(fmt.Sprintf("publish/cnip/%s.txt", name)), rc.getFileSize(txtFile), true, "&nbsp;"})
 
-					if catOut.Singbox.SRS && anyFileExists(srsFile) {
-						urlSrs := fmt.Sprintf("https://github.com/%s/raw/publish/cnip/%s.srs", os.Getenv("GITHUB_REPOSITORY"), name)
-						links = append(links, LinkDef{"SRS", urlSrs, getFileSize(srsFile), true, "&nbsp;"})
+					if catOut.Singbox.SRS && rc.anyFileExists(srsFile) {
+						links = append(links, LinkDef{"SRS", rc.fileURL(fmt.Sprintf("publish/cnip/%s.srs", name)), rc.getFileSize(srsFile), true, "&nbsp;"})
 					}
-					if catOut.Mihomo.MRS && anyFileExists(mrsFile) {
-						urlMrs := fmt.Sprintf("https://github.com/%s/raw/publish/cnip/%s.mrs", os.Getenv("GITHUB_REPOSITORY"), name)
-						links = append(links, LinkDef{"MRS", urlMrs, getFileSize(mrsFile), true, "&nbsp;"})
+					if catOut.Mihomo.MRS && rc.anyFileExists(mrsFile) {
+						links = append(links, LinkDef{"MRS", rc.fileURL(fmt.Sprintf("publish/cnip/%s.mrs", name)), rc.getFileSize(mrsFile), true, "&nbsp;"})
 					}
 
-					cellDirect, cellProxy := buildLinksCell(ghProxy, enableProxy, links...)
+					cellDirect, cellProxy := buildLinksCell(rc.ghProxy, rc.enableProxy, links...)
 					cnipRows = append(cnipRows, ReportRow{name, count, cellDirect, cellProxy})
 				}
 			}
@@ -724,10 +711,10 @@ func GenerateReport(results map[string]*ProcessedResult, cfg *Config, asnRuleCou
 			buildCnipRow("cnipv4", r.ExactCounts["cnipv4"])
 			buildCnipRow("cnipv6", r.ExactCounts["cnipv6"])
 		}
-		renderTableSection(&sb, "CNIP", enableProxy, cnipRows)
+		renderTableSection(&sb, "CNIP", rc.enableProxy, cnipRows)
 	}
 
-	renderGeoDataSection(&sb, cfg, ghProxy, enableProxy)
+	renderGeoDataSection(&sb, rc, cfg)
 
 	sb.WriteString("\n" + endTag + "\n")
 	reportTitle := "## 📦 DIY-Ruleset 自动编译报告\n\n**该页面由 GitHub Actions 每日自动生成**\n\n"

@@ -97,8 +97,15 @@ func Parse(line, format string) *Rule {
 	}
 	r := parseFn(line)
 
+	// 空值规则一律丢弃：这类行（如 `DOMAIN-REGEX,`、`IP-CIDR,`）语法残缺，
+	// 一旦进入规则集，空的正则会被编译成"匹配一切"并静默清空整个规则集。
+	// 集中在这一层拦截，覆盖所有 parser 与所有调用路径（上游 / add / remove / remove_urls）。
+	if r == nil || strings.TrimSpace(r.Value) == "" {
+		return nil
+	}
+
 	// 域名类规则统一小写，保证跨上游去重时大小写不敏感。
-	if r != nil && isDomainRuleType(r.Type) {
+	if isDomainRuleType(r.Type) {
 		r.Value = strings.ToLower(r.Value)
 	}
 	return r
@@ -407,6 +414,11 @@ func parseTypedRule(line string) *Rule {
 				cleanV = cleanV[:lastComma]
 			}
 		}
+		if cleanV == "" {
+			// `DOMAIN-REGEX,`（缺值）：丢弃。Parse 层还有兜底拦截，这里显式返回 nil 是为了
+			// 让"残缺 REGEX 行"在解析入口就不可构造，语义更清晰。
+			return nil
+		}
 		return &Rule{Type: t, Value: cleanV}
 	}
 	if t == "DOMAIN" || t == "DOMAIN-SUFFIX" {
@@ -414,11 +426,20 @@ func parseTypedRule(line string) *Rule {
 			return r
 		}
 	}
-	if t == "IP-CIDR" && !strings.Contains(cleanV, "/") {
-		cleanV += "/32"
-	}
-	if t == "IP-CIDR6" && !strings.Contains(cleanV, "/") {
-		cleanV += "/128"
+	// IP-CIDR / IP-CIDR6 的补前缀必须基于**非空**主值：
+	// `IP-CIDR,` 会得到 "/32" 这种残缺值，Parse 层拦不住（非空字符串），
+	// 只能在此显式丢弃（与 DOMAIN-REGEX 的 cleanV == "" 分支同理）。
+	if t == "IP-CIDR" || t == "IP-CIDR6" {
+		if cleanV == "" {
+			return nil
+		}
+		if !strings.Contains(cleanV, "/") {
+			if t == "IP-CIDR" {
+				cleanV += "/32"
+			} else {
+				cleanV += "/128"
+			}
+		}
 	}
 	return &Rule{Type: t, Value: cleanV}
 }
