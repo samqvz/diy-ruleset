@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -91,8 +92,42 @@ func TestASNRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertRuleSet(t, "AS13335", got["AS13335"], entries["AS13335"])
-	assertRuleSet(t, "AS15169", got["AS15169"], entries["AS15169"])
+	assertRuleSet(t, "as13335", got["as13335"], entries["AS13335"])
+	assertRuleSet(t, "as15169", got["as15169"], entries["AS15169"])
+}
+
+// TestMMDBTagsUppercase 锁定 country.mmdb 落盘的 tags 为大写（对齐 GeoLite2 / Country.mmdb 习惯）。
+// 读取侧统一小写，故写入与读取的大小写不同是刻意的（见 mmdbFileTags）。
+func TestMMDBTagsUppercase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "country.mmdb")
+	if err := WriteMMDB(path, map[string][]Rule{
+		"cn":      {{Type: "IP-CIDR", Value: "1.0.1.0/24"}},
+		"AS13335": {{Type: "IP-CIDR", Value: "1.0.1.0/24"}},
+		"cncase":  {{Type: "IP-CIDR", Value: "1.0.2.0/24"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"CN", "AS13335", "CNCASE"} {
+		if !bytes.Contains(data, []byte(want)) {
+			t.Fatalf("country.mmdb 中没有大写的 tag %q：下游按大写查询会落空", want)
+		}
+	}
+	for _, unwanted := range []string{"as13335", "cncase"} {
+		if bytes.Contains(data, []byte(unwanted)) {
+			t.Fatalf("country.mmdb 中出现了小写 tag %q", unwanted)
+		}
+	}
+
+	got, err := LoadMMDB(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRuleSet(t, "cn", got["cn"], []Rule{{Type: "IP-CIDR", Value: "1.0.1.0/24"}})
+	assertRuleSet(t, "as13335", got["as13335"], []Rule{{Type: "IP-CIDR", Value: "1.0.1.0/24"}})
 }
 
 func TestParseASNTag(t *testing.T) {
@@ -379,6 +414,42 @@ func TestExportGeoDataPreserveUpstream(t *testing.T) {
 }
 
 // assertRuleSet 以"无序集合"语义比较两组规则。
+// TestGeoDatCodeUppercase 锁定 dat 落盘的 country_code 为大写（xray/v2ray 兼容性底线）。
+//
+// xray-core common/geodata/geodat_loader.go 的 seek 不做 protobuf 反序列化，
+// 而是逐条读 entry 长度前缀后按字节比对 code，且调用方会先 strings.ToUpper(code)；
+// 小写 code 会让 "geosite:cn" 以 "failed to check code CN from geosite.dat > EOF" 启动失败。
+func TestGeoDatCodeUppercase(t *testing.T) {
+	geoSite := filepath.Join(t.TempDir(), "geosite.dat")
+	if err := WriteGeoSite(geoSite, map[string][]Rule{
+		"applecn": {{Type: "DOMAIN-SUFFIX", Value: "example.com"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	assertDatCode(t, "geosite.dat", geoSite, "APPLECN")
+
+	geoIP := filepath.Join(t.TempDir(), "geoip.dat")
+	if err := WriteGeoIP(geoIP, map[string][]Rule{
+		"cn": {{Type: "IP-CIDR", Value: "1.0.1.0/24"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	assertDatCode(t, "geoip.dat", geoIP, "CN")
+}
+
+// assertDatCode 断言 dat 里存在以 0x0a <len> <code> 起始的 entry 体（field 1 = code）。
+func assertDatCode(t *testing.T, file, path, code string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	needle := append([]byte{0x0a, byte(len(code))}, code...)
+	if !bytes.Contains(data, needle) {
+		t.Fatalf("%s 中没有大写的 code %q：xray 按字节扫描会报 failed to check code %s ... > EOF", file, code, code)
+	}
+}
+
 func assertRuleSet(t *testing.T, name string, got, want []Rule) {
 	t.Helper()
 	if len(got) != len(want) {
