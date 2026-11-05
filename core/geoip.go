@@ -5,6 +5,7 @@ import (
 	"net/netip"
 	"os"
 	"slices"
+	"strings"
 )
 
 // ---- geoip.dat（v2ray GeoIPList）读写 ----
@@ -23,6 +24,7 @@ type geoIPCidr struct {
 }
 
 // LoadGeoIP 读取 geoip.dat，返回 "国家码 -> IP-CIDR 规则" 映射。
+// 标签统一小写（与项目内部约定一致）：官方 geoip.dat 里 code 是大写的（CN/US/AS13335）。
 func LoadGeoIP(path string) (map[string][]Rule, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -55,6 +57,7 @@ func LoadGeoIP(path string) (map[string][]Rule, error) {
 		if code == "" {
 			continue
 		}
+		code = strings.ToLower(code)
 		for _, c := range cidrs {
 			addr, ok := netip.AddrFromSlice(c.ip)
 			if !ok {
@@ -143,7 +146,9 @@ func parseCIDR(msg []byte) (geoIPCidr, error) {
 }
 
 // WriteGeoIP 把 "国家码 -> IP-CIDR 规则" 写为 geoip.dat（标签按字典序稳定输出）。
+// 落盘 code 一律大写，否则 xray/v2ray 按字节扫描查不到（详见 uppercaseGeoKeys）。
 func WriteGeoIP(path string, entries map[string][]Rule) error {
+	entries = uppercaseGeoKeys(entries)
 	var buf []byte
 	for _, code := range slices.Sorted(maps.Keys(entries)) {
 		var msg []byte

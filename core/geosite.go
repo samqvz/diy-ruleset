@@ -33,6 +33,8 @@ const (
 )
 
 // LoadGeoSite 读取 geosite.dat，返回 "标签 -> 域名规则" 映射。
+// 标签统一小写（与项目内部约定一致）：xray 官方 dat 里 code 是大写的，
+// 保留原样会让调用方两套大小写共存。
 func LoadGeoSite(path string) (map[string][]Rule, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -63,6 +65,7 @@ func LoadGeoSite(path string) (map[string][]Rule, error) {
 			return nil, err
 		}
 		if code != "" {
+			code = strings.ToLower(code)
 			out[code] = append(out[code], rules...)
 		}
 	}
@@ -144,7 +147,9 @@ func parseDomain(msg []byte) *Rule {
 }
 
 // WriteGeoSite 把 "标签 -> 域名规则" 写为 geosite.dat（标签按字典序稳定输出）。
+// 落盘 code 一律大写，否则 xray/v2ray 按字节扫描查不到（详见 uppercaseGeoKeys）。
 func WriteGeoSite(path string, entries map[string][]Rule) error {
+	entries = uppercaseGeoKeys(entries)
 	var buf []byte
 	for _, code := range slices.Sorted(maps.Keys(entries)) {
 		var msg []byte

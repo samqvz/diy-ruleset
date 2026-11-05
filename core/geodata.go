@@ -42,6 +42,26 @@ var geoKindNames = [...]string{"geosite", "geoip", "asn"}
 // 回退成 "auto"，表现为**报表来源错标且不报错**。
 func geoStoreKey(kind, tag string) string { return kind + ":" + tag }
 
+// uppercaseGeoKeys 把 dat 输出用的标签名归一为大写，并合并仅大小写不同的同义标签。
+//
+// 落盘的 country_code **必须大写**：xray / v2ray 的 geodata 加载器不整体 protobuf 反序列化，
+// 而是逐条读出 entry 的长度前缀后**按字节**比对 code（xray-core
+// common/geodata/geodat_loader.go 的 seek：bytes.Equal(prefix[2:], code)），
+// 调用方还会先 strings.ToUpper(code)（同目录 rule_parser.go）。因此小写 code 会让
+// "geosite:cn" 直接以 "failed to check code CN from geosite.dat > EOF" 失败。
+//
+// 合并大小写同义标签是必要的：读取侧把上游标签统一小写（见 buildGeoOfType），
+// 若上游既给出 "as13335" 又由 IP-ASN 识别出 "AS13335"，大写后会撞成同一键，
+// 直接覆盖会丢规则。按小写键字典序遍历保证输出稳定。
+func uppercaseGeoKeys(entries map[string][]Rule) map[string][]Rule {
+	out := make(map[string][]Rule, len(entries))
+	for _, tag := range slices.Sorted(maps.Keys(entries)) {
+		code := strings.ToUpper(tag)
+		out[code] = append(out[code], entries[tag]...)
+	}
+	return out
+}
+
 // geoTable 按 kind 取对应的标签表；未知 kind 返回 nil（读取方对 nil map 安全）。
 func (s *GeoDataStore) geoTable(kind string) map[string][]Rule {
 	switch kind {

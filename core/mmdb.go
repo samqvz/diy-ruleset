@@ -7,7 +7,6 @@ import (
 	"net/netip"
 	"os"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -28,6 +27,7 @@ import (
 // LoadMMDB 读取 mmdb 文件，返回 "标签 -> IP-CIDR 规则" 映射。
 // 兼容三种记录：tags 数组（自定义）、GeoLite2-ASN（autonomous_system_number）、
 // GeoLite2-Country（country.iso_code，如 CN / PRIVATE / CLOUDFLARE）。
+// 标签统一小写（与项目内部约定一致）：文件内 code 一律大写，保留原样会让调用方两套大小写共存。
 func LoadMMDB(path string) (map[string][]Rule, error) {
 	reader, err := maxminddb.Open(path)
 	if err != nil {
@@ -49,6 +49,7 @@ func LoadMMDB(path string) (map[string][]Rule, error) {
 		}
 		rule := mmdbPrefixToRule(result.Prefix())
 		for _, tag := range tags {
+			tag = strings.ToLower(tag)
 			out[tag] = append(out[tag], rule)
 		}
 	}
@@ -57,7 +58,7 @@ func LoadMMDB(path string) (map[string][]Rule, error) {
 
 // mmdbRecordTags 从一条 mmdb 记录还原出标签集合。
 // 优先级：tags 数组 → autonomous_system_number（GeoLite2-ASN）→ country.iso_code（GeoLite2-Country）。
-// 返回的标签保持写入侧的顺序（写入侧已 sort.Strings），读取方据此可做有序比较。
+// 返回的标签保持写入侧的顺序（写入侧已排序），读取方据此可做有序比较。
 func mmdbRecordTags(result maxminddb.Result) ([]string, error) {
 	var rec struct {
 		Tags    []string `maxminddb:"tags"`
@@ -98,6 +99,7 @@ func mmdbPrefixToRule(pfx netip.Prefix) Rule {
 
 // WriteMMDB 把 "标签 -> IP-CIDR 规则" 写为 country.mmdb（MaxMind mmdb 格式）：
 // 记录用 tags 数组，含国家码 / ASN / category 组，与 geoip.dat 的语义一致。
+// 文件内标签一律大写（详见 mmdbFileTags）。
 //
 // 注意：一个 IP 可能同时属于多个标签（如既在国家 "cn" 又在 AS "13335"），
 // 因此这里把 "标签->IP" 反转为 "IP->标签集合"，再用 tags 数组表达。
@@ -109,8 +111,7 @@ func WriteMMDB(path string, entries map[string][]Rule) error {
 
 	ipTags := invertIPTags(entries)
 	for _, ip := range slices.Sorted(maps.Keys(ipTags)) {
-		tags := ipTags[ip]
-		sort.Strings(tags)
+		tags := mmdbFileTags(ipTags[ip])
 		ipNet, ok := parseIPNet(ip)
 		if !ok {
 			continue
@@ -212,6 +213,27 @@ func invertIPTags(entries map[string][]Rule) map[string][]string {
 		}
 	}
 	return ipTags
+}
+
+// mmdbFileTags 把一条记录的标签集合归一为大写并去重，升序返回（输出稳定）。
+//
+// 与 geosite.dat / geoip.dat 同一约定：**文件内标签一律大写，内部一律小写**。
+// 官方数据（GeoLite2-Country 的 country.iso_code、GeoLite2-ASN、Loyalsoldier 的
+// Country.mmdb）都是大写国家码 / AS 号，下游按大写查询；写成小写会查不到。
+// 去重是必需的：'cn' 与 'CN' 大写后是同一标签，重复写入会让同一 IP 带重复 tag。
+func mmdbFileTags(tags []string) []string {
+	out := make([]string, 0, len(tags))
+	seen := make(map[string]bool, len(tags))
+	for _, t := range tags {
+		code := strings.ToUpper(strings.TrimSpace(t))
+		if code == "" || seen[code] {
+			continue
+		}
+		seen[code] = true
+		out = append(out, code)
+	}
+	slices.Sort(out)
+	return out
 }
 
 // toMmdbSlice 把字符串切片转为 mmdb 的 Slice 类型。

@@ -16,13 +16,19 @@ global:
   # Geo / ASN 数据文件（可选，详见 README「Geo 与 ASN 规则」章节）
   # geosite / geoip / mmdb 各自独立，统一对象形式；输出路径固定为
   # publish/geosite.dat、publish/geoip.dat、publish/country.mmdb、publish/asn.mmdb。
+  #
+  # 标签大小写约定：pick / exclude / category 名随意大小写（读取侧大小写不敏感），
+  # 而**文件内标签一律大写**（geosite.dat / geoip.dat 的 code 为 CN / AS13335 / GOOGLE，
+  # country.mmdb 的 tags 同理）。这是 xray / v2ray 的硬性要求：它们加载 dat 时不做
+  # protobuf 反序列化，而是按字节比对 code（查询前 strings.ToUpper），写出小写 code 会让
+  # "geosite:cn" 启动报 failed to check code CN from geosite.dat > EOF。
   geodata:
     geosite:
       enable: true    # 默认 false。true=生成 publish/geosite.dat（默认所有 category 的域名规则）
     geoip:
       enable: true    # 默认 false。true=生成 publish/geoip.dat（默认所有 category 的 IP 规则）
     mmdb:
-      enable: true    # 默认 false。true=同时生成 publish/country.mmdb（tags：国家码/ASN/category）与 publish/asn.mmdb（仅 ASN，GeoLite2-ASN 兼容）
+      enable: true    # 默认 false。true=同时生成 publish/country.mmdb（tags：国家码/ASN/category，大写）与 publish/asn.mmdb（仅 ASN，GeoLite2-ASN 兼容）
     # 需要拉取上游时，在对应类型下加 upstreams（URL 列表，类型由外层决定）与 pick：
     # geosite:
     #   enable: true

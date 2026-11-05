@@ -165,10 +165,16 @@ DIY-Ruleset/
 
 | 文件 | 格式 | 内容 | 标签含义 |
 | :--- | :--- | :--- | :--- |
-| geosite.dat | v2ray GeoSite（protobuf） | 域名规则集合 | 站点/分类名，如 `google` |
-| geoip.dat | v2ray GeoIP（protobuf） | IP 网段集合 | 国家码 / ASN 号 / 分类名 |
+| geosite.dat | v2ray GeoSite（protobuf） | 域名规则集合 | 站点/分类名，如 `google`（**落盘 code 大写**：`GOOGLE`） |
+| geoip.dat | v2ray GeoIP（protobuf） | IP 网段集合 | 国家码 / ASN 号 / 分类名（**落盘 code 大写**：`CN` / `AS13335`） |
 | country.mmdb | MaxMind mmdb | IP 网段集合 | 国家码 / ASN 号 / 分类名（记录为 `tags` 数组） |
 | asn.mmdb | MaxMind mmdb | IP 网段集合 | 仅 ASN（记录为 `autonomous_system_number`，GeoLite2-ASN 兼容） |
+
+> 读写两侧大小写不同是刻意的：读取时标签统一小写（与 `pick` / category 名一致，大小写不敏感），
+> 写盘时统一大写。xray / v2ray 的 geodata 加载器**不整体 protobuf 反序列化**，而是逐条读 entry
+> 长度前缀后**按字节**比对 code（`common/geodata/geodat_loader.go` 的 `seek`），且查询前会
+> `strings.ToUpper`。若写出小写 code，`geosite:cn` 会直接以
+> `failed to check code CN from geosite.dat > EOF` 启动失败。
 
 ### 输出 GeoSite / GeoIP / ASN 文件
 
